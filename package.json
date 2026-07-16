@@ -12,6 +12,7 @@
     "lint": "corepack pnpm --recursive --if-present run lint",
     "typecheck": "corepack pnpm --recursive --if-present run typecheck",
     "test": "corepack pnpm --recursive --if-present run test",
+    "test:coverage": "vitest run --coverage --config vitest.coverage.config.ts",
     "build": "tsc --build",
     "clean": "tsc --build --clean"
   },

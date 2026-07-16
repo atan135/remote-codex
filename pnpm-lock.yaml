@@ -30,11 +30,23 @@ importers:
         specifier: 3.2.4
         version: 3.2.4(@types/node@22.15.21)
 
-  edge-client: {}
+  edge-client:
+    dependencies:
+      '@remote-codex/shared':
+        specifier: workspace:*
+        version: link:../shared
 
-  egress-agent: {}
+  egress-agent:
+    dependencies:
+      '@remote-codex/shared':
+        specifier: workspace:*
+        version: link:../shared
 
-  server: {}
+  server:
+    dependencies:
+      '@remote-codex/shared':
+        specifier: workspace:*
+        version: link:../shared
 
   shared: {}
 
