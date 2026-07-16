@@ -44,7 +44,8 @@ export interface EdgeClientConfig {
   readonly edgeUserId: string;
   readonly edgeDeviceId: string;
   readonly serverUrl: URL;
-  readonly listenHost: "127.0.0.1" | "::1";
+  /** edge 代理只能暴露在 IPv4 loopback，禁止 IPv6 或任何公共监听地址。 */
+  readonly listenHost: "127.0.0.1";
   readonly listenPort: number;
   readonly allowedDestination: AllowedDestination;
   readonly limits: ResourceLimits;
@@ -206,8 +207,8 @@ function parseSecureWebSocketUrl(value: unknown, path: string): URL {
   return url;
 }
 
-function parseListenHost(value: unknown, path: string): "127.0.0.1" | "::1" {
-  if (value === "127.0.0.1" || value === "::1") {
+function parseListenHost(value: unknown, path: string): "127.0.0.1" {
+  if (value === "127.0.0.1") {
     return value;
   }
 

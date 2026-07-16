@@ -112,6 +112,18 @@ describe("runtime configuration", () => {
     );
     expectConfigError(
       () =>
+        parseEdgeClientConfig({
+          component: "edge-client",
+          edgeUserId: "edge-user-1",
+          edgeDeviceId: "edge-device-1",
+          serverUrl: "wss://tunnel.example.test",
+          listenHost: "::1",
+          allowedDestination: destination
+        }),
+      "CONFIG_LISTEN_HOST_NOT_LOOPBACK"
+    );
+    expectConfigError(
+      () =>
         parseEgressAgentConfig({
           component: "egress-agent",
           agentId: "company-agent-1",
