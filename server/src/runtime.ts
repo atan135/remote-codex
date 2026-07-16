@@ -3,7 +3,12 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { createServer, type Server as HttpsServer } from "node:https";
 import type { Duplex } from "node:stream";
 
-import { assertTlsVerificationEnabled } from "@remote-codex/shared";
+import {
+  assertTlsVerificationEnabled,
+  type AllowedDestination,
+  type ResourceLimits,
+  type ServerSigningCredentials
+} from "@remote-codex/shared";
 import { WebSocketServer, type WebSocket } from "ws";
 
 import { PeerSessionManager, type ServerPeerIdentityRegistration } from "./peer-session.js";
@@ -12,6 +17,7 @@ import {
   type AuthorizationRegistryDocument,
   type AuthorizationRevocationListener
 } from "./authorization-registry.js";
+import { StreamOpenCoordinator } from "./stream-open.js";
 
 export const HEALTH_CHECK_PATH = "/health" as const;
 export const TUNNEL_WEBSOCKET_PATH = "/tunnel" as const;
@@ -48,6 +54,15 @@ export const DEFAULT_SERVER_TRANSPORT_LIMITS: ServerTransportLimits = Object.fre
 
 export const DEFAULT_PEER_HEARTBEAT_TIMEOUT_MS = 45_000;
 
+/** 开流授权所需的独立 server 签名身份与固定目标配置。 */
+export interface ServerStreamAuthorizationOptions {
+  readonly signingCredentials: ServerSigningCredentials;
+  readonly allowedDestination: AllowedDestination;
+  readonly resourceLimits?: ResourceLimits;
+  readonly capabilityTtlMs?: number;
+  readonly now?: () => number;
+}
+
 export interface TunnelServerOptions {
   readonly tls: TlsCredentials;
   readonly allowedOrigins: readonly string[];
@@ -60,6 +75,8 @@ export interface TunnelServerOptions {
   readonly authorizationDocument?: AuthorizationRegistryDocument;
   /** 授权撤销后由后续 stream 层订阅并关闭受影响存量流。 */
   readonly onAuthorizationRevocation?: AuthorizationRevocationListener;
+  /** 未配置时 server 不接受 stream 帧；绝不降级为通用中继。 */
+  readonly streamAuthorization?: ServerStreamAuthorizationOptions;
 }
 
 export interface TunnelServer {
@@ -67,6 +84,7 @@ export interface TunnelServer {
   readonly webSocketServer: WebSocketServer;
   readonly peerSessions: PeerSessionManager;
   readonly authorizationRegistry: AuthorizationRegistry;
+  readonly streamOpenCoordinator?: StreamOpenCoordinator;
   close(): Promise<void>;
 }
 
@@ -299,6 +317,30 @@ export function createTunnelServer(options: TunnelServerOptions): TunnelServer {
       ? {}
       : { onRevocation: options.onAuthorizationRevocation })
   });
+  const streamOpenCoordinator =
+    options.streamAuthorization === undefined
+      ? undefined
+      : new StreamOpenCoordinator({
+          peerSessions,
+          authorizationRegistry,
+          ...options.streamAuthorization
+        });
+  const streamExpirationTimer =
+    streamOpenCoordinator === undefined
+      ? undefined
+      : setInterval(
+          () => streamOpenCoordinator.expireOpenStreams(),
+          Math.max(
+            10,
+            Math.floor(
+              Math.min(
+                options.streamAuthorization?.resourceLimits?.openTimeoutMs ?? 15_000,
+                options.streamAuthorization?.capabilityTtlMs ?? 30_000
+              ) / 2
+            )
+          )
+        );
+  streamExpirationTimer?.unref();
   const connectionRates = new Map<string, ConnectionRateRecord>();
   let pendingHandshakes = 0;
 
@@ -371,7 +413,12 @@ export function createTunnelServer(options: TunnelServerOptions): TunnelServer {
     webSocketServer,
     peerSessions,
     authorizationRegistry,
+    ...(streamOpenCoordinator === undefined ? {} : { streamOpenCoordinator }),
     close: async (): Promise<void> => {
+      if (streamExpirationTimer !== undefined) {
+        clearInterval(streamExpirationTimer);
+      }
+      streamOpenCoordinator?.close();
       peerSessions.close();
       webSocketServer.close();
       await new Promise<void>((resolve, reject) => {

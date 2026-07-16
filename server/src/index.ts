@@ -13,7 +13,8 @@ export {
   type TlsCredentialPaths,
   type TlsCredentials,
   type TunnelServer,
-  type TunnelServerOptions
+  type TunnelServerOptions,
+  type ServerStreamAuthorizationOptions
 } from "./runtime.js";
 
 export {
@@ -22,8 +23,17 @@ export {
   type AuthenticatedPeerSession,
   type PeerAuthenticationMetadata,
   type PeerSessionManagerOptions,
+  type PeerSessionRemovalListener,
+  type PeerSessionStreamFrameListener,
   type ServerPeerIdentityRegistration
 } from "./peer-session.js";
+
+export {
+  StreamOpenCoordinator,
+  type StreamOpenCoordinatorOptions,
+  type StreamOwnership,
+  type StreamPeerSessionGateway
+} from "./stream-open.js";
 
 export {
   AuthorizationRegistry,

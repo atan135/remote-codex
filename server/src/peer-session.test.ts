@@ -4,24 +4,30 @@ import type { AddressInfo } from "node:net";
 
 import {
   connectionFrame,
+  createServerSigningCredentials,
+  createServerSigningIdentity,
   createEdgeDeviceIdentity,
   createEgressAgentIdentity,
   createIdentityPrivateKey,
   createIdentityPublicKey,
   decodeChallengePayload,
   decodeFrame,
+  DEFAULT_ALLOWED_DESTINATION,
   encodeAuthenticatePayload,
   encodeFrame,
   encodeHeartbeatPayload,
   encodeRegisterPayload,
+  encodeStreamOpenPayload,
   FrameType,
   IdentityKeyRole,
   signAuthenticationChallenge,
+  streamFrame,
   type EdgeDeviceIdentity,
   type EgressAgentIdentity,
   type IdentityPrivateKey,
   type PeerRole,
-  type RegisterPayload
+  type RegisterPayload,
+  type ServerSigningCredentials
 } from "@remote-codex/shared";
 import selfsigned from "selfsigned";
 import WebSocket from "ws";
@@ -44,6 +50,7 @@ interface AuthenticationFixture {
   readonly edgePrivateKey: IdentityPrivateKey<typeof IdentityKeyRole.EDGE_DEVICE_AUTHENTICATION>;
   readonly agentIdentity: EgressAgentIdentity;
   readonly agentPrivateKey: IdentityPrivateKey<typeof IdentityKeyRole.EGRESS_AGENT_AUTHENTICATION>;
+  readonly signingCredentials: ServerSigningCredentials;
 }
 
 interface ConnectedPeer {
@@ -85,6 +92,7 @@ function nonce(seed: number): Uint8Array {
 function createFixture(suffix = 1): AuthenticationFixture {
   const edgeKeys = generateKeyPairSync("ed25519");
   const agentKeys = generateKeyPairSync("ed25519");
+  const signingKeys = generateKeyPairSync("ed25519");
   const edgePrivateKey = createIdentityPrivateKey(
     { role: IdentityKeyRole.EDGE_DEVICE_AUTHENTICATION, keyId: `edge-key-${suffix}` },
     edgeKeys.privateKey
@@ -111,14 +119,30 @@ function createFixture(suffix = 1): AuthenticationFixture {
         agentKeys.publicKey
       )
     }),
-    agentPrivateKey
+    agentPrivateKey,
+    signingCredentials: createServerSigningCredentials({
+      identity: createServerSigningIdentity({
+        serverId: `server-${suffix}`,
+        capabilityVerificationKey: createIdentityPublicKey(
+          { role: IdentityKeyRole.SERVER_CAPABILITY_SIGNING, keyId: `server-key-${suffix}` },
+          signingKeys.publicKey
+        )
+      }),
+      capabilitySigningKey: createIdentityPrivateKey(
+        { role: IdentityKeyRole.SERVER_CAPABILITY_SIGNING, keyId: `server-key-${suffix}` },
+        signingKeys.privateKey
+      )
+    })
   };
 }
 
 async function startServer(
   peerIdentities: readonly ServerPeerIdentityRegistration[],
   overrides: Partial<
-    Pick<Parameters<typeof createTunnelServer>[0], "heartbeatTimeoutMs" | "authenticationTimeoutMs" | "authorizationDocument">
+    Pick<
+      Parameters<typeof createTunnelServer>[0],
+      "heartbeatTimeoutMs" | "authenticationTimeoutMs" | "authorizationDocument" | "streamAuthorization"
+    >
   > = {}
 ): Promise<string> {
   runningServer = createTunnelServer({
@@ -265,6 +289,64 @@ describe("WSS peer registration and session management", () => {
     expect(
       edgeSessions.map((session) => runningServer?.authorizationRegistry.resolveAgentForEdge(session.identity)?.agentId)
     ).toEqual([firstFixture.agentIdentity.agentId, firstFixture.agentIdentity.agentId]);
+  });
+
+  it("通过受控 WSS 会话将 server 签发的 open 仅发送给授权 agent，并把 opened 映射回 edge 请求 ID", async () => {
+    const fixture = createFixture();
+    const url = await startServer(
+      [{ identity: fixture.edgeIdentity }, { identity: fixture.agentIdentity }],
+      {
+        authorizationDocument: {
+          auditVersion: 1,
+          authorizations: [
+            {
+              edgeUserId: fixture.edgeIdentity.edgeUserId,
+              edgeDeviceId: fixture.edgeIdentity.edgeDeviceId,
+              agentId: fixture.agentIdentity.agentId,
+              status: "active",
+              quota: { maxConcurrentStreams: 1, maxBufferedBytes: 16 * 1024 },
+              createdAtMs: 0,
+              auditVersion: 1
+            }
+          ]
+        },
+        streamAuthorization: {
+          signingCredentials: fixture.signingCredentials,
+          allowedDestination: DEFAULT_ALLOWED_DESTINATION,
+          capabilityTtlMs: 500
+        }
+      }
+    );
+    const edge = await authenticate(url, fixture.edgeIdentity, fixture.edgePrivateKey, "edge-client", nonce(60));
+    const agent = await authenticate(url, fixture.agentIdentity, fixture.agentPrivateKey, "egress-agent", nonce(61));
+    const edgeStreamId = Uint8Array.from({ length: 16 }, (_, index) => index + 1);
+    const agentOpen = nextFrame(agent.socket);
+    edge.socket.send(
+      encodeFrame(
+        streamFrame(
+          FrameType.STREAM_OPEN,
+          edgeStreamId,
+          encodeStreamOpenPayload({
+            hostname: DEFAULT_ALLOWED_DESTINATION.hostname,
+            port: 443,
+            capability: Uint8Array.of(1)
+          })
+        )
+      ),
+      { binary: true }
+    );
+    const forwardedOpen = await agentOpen;
+    expect(forwardedOpen.type).toBe(FrameType.STREAM_OPEN);
+    expect(forwardedOpen.streamId).not.toEqual(edgeStreamId);
+    expect(runningServer?.streamOpenCoordinator?.getActiveStreams()).toHaveLength(1);
+
+    const edgeOpened = nextFrame(edge.socket);
+    agent.socket.send(encodeFrame(streamFrame(FrameType.STREAM_OPENED, forwardedOpen.streamId, new Uint8Array())), {
+      binary: true
+    });
+    const opened = await edgeOpened;
+    expect(opened.type).toBe(FrameType.STREAM_OPENED);
+    expect(opened.streamId).toEqual(edgeStreamId);
   });
 
   it("authenticates independently registered edge and agent peers and retains metadata only", async () => {

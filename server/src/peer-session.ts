@@ -17,7 +17,8 @@ import {
   type IssuedAuthenticationChallenge,
   type PeerAuthenticationIdentity,
   type PeerRole,
-  type RegisterPayload
+  type RegisterPayload,
+  type TunnelFrame
 } from "@remote-codex/shared";
 import { WebSocket, type RawData } from "ws";
 
@@ -43,6 +44,15 @@ export interface AuthenticatedPeerSession {
   readonly lastHeartbeatAtMs: number;
   readonly lastHeartbeatSequence: number | undefined;
 }
+
+/** 已认证 peer 发送的 stream 帧。监听器不得记录或保留 payload。 */
+export type PeerSessionStreamFrameListener = (
+  session: AuthenticatedPeerSession,
+  frame: TunnelFrame
+) => void;
+
+/** peer 会话失效通知，用于关闭只归属该会话的 stream。 */
+export type PeerSessionRemovalListener = (session: AuthenticatedPeerSession) => void;
 
 export interface PeerSessionManagerOptions {
   readonly peerIdentities?: readonly ServerPeerIdentityRegistration[];
@@ -161,6 +171,8 @@ export class PeerSessionManager {
   private readonly sessionsBySocket = new Map<WebSocket, SessionRecord>();
   private readonly sessionsByPeerId = new Map<string, SessionRecord>();
   private readonly agentSessionsByAgentId = new Map<string, SessionRecord>();
+  private readonly streamFrameListeners = new Set<PeerSessionStreamFrameListener>();
+  private readonly sessionRemovalListeners = new Set<PeerSessionRemovalListener>();
   private readonly challengeReplayProtector = new NonceReplayProtector();
   private readonly registrationNonceReplayProtector = new NonceReplayProtector();
   private readonly now: () => number;
@@ -225,6 +237,34 @@ export class PeerSessionManager {
   public getSession(peerId: string): AuthenticatedPeerSession | undefined {
     const session = this.sessionsByPeerId.get(peerId);
     return session === undefined ? undefined : snapshot(session);
+  }
+
+  /** 仅返回当前在线且已认证的指定 agent 会话。 */
+  public getAgentSession(agentId: string): AuthenticatedPeerSession | undefined {
+    const session = this.agentSessionsByAgentId.get(agentId);
+    return session === undefined ? undefined : snapshot(session);
+  }
+
+  /** 订阅已认证 peer 的 stream 帧；没有监听器时 stream 帧会被当作协议违规。 */
+  public subscribeStreamFrames(listener: PeerSessionStreamFrameListener): () => void {
+    this.streamFrameListeners.add(listener);
+    return (): void => {
+      this.streamFrameListeners.delete(listener);
+    };
+  }
+
+  /** 订阅会话撤销与断开，取消订阅函数可重复调用。 */
+  public subscribeSessionRemovals(listener: PeerSessionRemovalListener): () => void {
+    this.sessionRemovalListeners.add(listener);
+    return (): void => {
+      this.sessionRemovalListeners.delete(listener);
+    };
+  }
+
+  /** 只向仍在线的指定已认证 peer 发送经过 shared 校验的二进制帧。 */
+  public sendFrame(peerId: string, frame: TunnelFrame): boolean {
+    const session = this.sessionsByPeerId.get(peerId);
+    return session !== undefined && this.send(session.socket, frame);
   }
 
   public getPendingConnectionCount(): number {
@@ -295,8 +335,15 @@ export class PeerSessionManager {
     }
 
     const session = this.sessionsBySocket.get(socket);
-    if (session === undefined || frame.type !== FrameType.HEARTBEAT) {
+    if (session === undefined) {
       this.revokeSocket(socket, CLOSE_CODE_PROTOCOL, "PROTOCOL_VIOLATION");
+      return;
+    }
+
+    if (frame.type !== FrameType.HEARTBEAT) {
+      if (!isStreamFrameType(frame.type) || !this.notifyStreamFrame(session, frame)) {
+        this.revokeSession(session, CLOSE_CODE_PROTOCOL, "PROTOCOL_VIOLATION");
+      }
       return;
     }
 
@@ -455,12 +502,7 @@ export class PeerSessionManager {
   }
 
   private revokeSession(session: SessionRecord, closeCode: number, reason: string): void {
-    this.sessionsBySocket.delete(session.socket);
-    this.sessionsByPeerId.delete(session.peerId);
-    const agentId = session.identity.agentId;
-    if (session.identity.kind === "egress-agent" && agentId !== undefined && this.agentSessionsByAgentId.get(agentId) === session) {
-      this.agentSessionsByAgentId.delete(agentId);
-    }
+    this.removeSessionRecord(session);
     this.revokeSocket(session.socket, closeCode, reason);
   }
 
@@ -468,12 +510,7 @@ export class PeerSessionManager {
     this.pendingBySocket.delete(socket);
     const session = this.sessionsBySocket.get(socket);
     if (session !== undefined) {
-      this.sessionsBySocket.delete(socket);
-      this.sessionsByPeerId.delete(session.peerId);
-      const agentId = session.identity.agentId;
-      if (session.identity.kind === "egress-agent" && agentId !== undefined && this.agentSessionsByAgentId.get(agentId) === session) {
-        this.agentSessionsByAgentId.delete(agentId);
-      }
+      this.removeSessionRecord(session);
     }
 
     if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CLOSING) {
@@ -485,25 +522,72 @@ export class PeerSessionManager {
     this.pendingBySocket.delete(socket);
     const session = this.sessionsBySocket.get(socket);
     if (session !== undefined) {
-      this.sessionsBySocket.delete(socket);
-      this.sessionsByPeerId.delete(session.peerId);
-      const agentId = session.identity.agentId;
-      if (session.identity.kind === "egress-agent" && agentId !== undefined && this.agentSessionsByAgentId.get(agentId) === session) {
-        this.agentSessionsByAgentId.delete(agentId);
+      this.removeSessionRecord(session);
+    }
+  }
+
+  private removeSessionRecord(session: SessionRecord): void {
+    if (this.sessionsBySocket.get(session.socket) !== session) {
+      return;
+    }
+
+    this.sessionsBySocket.delete(session.socket);
+    this.sessionsByPeerId.delete(session.peerId);
+    const agentId = session.identity.agentId;
+    if (session.identity.kind === "egress-agent" && agentId !== undefined && this.agentSessionsByAgentId.get(agentId) === session) {
+      this.agentSessionsByAgentId.delete(agentId);
+    }
+
+    const removed = snapshot(session);
+    for (const listener of this.sessionRemovalListeners) {
+      try {
+        listener(removed);
+      } catch {
+        // 清理监听器不能阻止会话撤销或影响其他监听器。
       }
     }
   }
 
-  private send(socket: WebSocket, frame: ReturnType<typeof connectionFrame>): void {
+  private notifyStreamFrame(session: SessionRecord, frame: TunnelFrame): boolean {
+    if (this.streamFrameListeners.size === 0) {
+      return false;
+    }
+
+    const deliveredFrame: TunnelFrame = Object.freeze({
+      type: frame.type,
+      flags: frame.flags,
+      streamId: Uint8Array.from(frame.streamId),
+      payload: Uint8Array.from(frame.payload)
+    });
+    const deliveredSession = snapshot(session);
+
+    for (const listener of this.streamFrameListeners) {
+      try {
+        listener(deliveredSession, deliveredFrame);
+      } catch {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  private send(socket: WebSocket, frame: TunnelFrame): boolean {
     if (socket.readyState !== WebSocket.OPEN) {
       this.revokeSocket(socket, CLOSE_CODE_POLICY, "PEER_DISCONNECTED");
-      return;
+      return false;
     }
 
     try {
       socket.send(Buffer.from(encodeFrame(frame)), { binary: true });
+      return true;
     } catch {
       this.revokeSocket(socket, CLOSE_CODE_POLICY, "PEER_DISCONNECTED");
+      return false;
     }
   }
+}
+
+function isStreamFrameType(type: FrameType): boolean {
+  return type >= FrameType.STREAM_OPEN && type <= FrameType.STREAM_CLOSE;
 }
