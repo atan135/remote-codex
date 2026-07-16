@@ -1,0 +1,9 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./shared" },
+    { "path": "./server" },
+    { "path": "./egress-agent" },
+    { "path": "./edge-client" }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "name": "remote-codex",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.15.0",
+  "engines": {
+    "node": ">=22 <23",
+    "pnpm": ">=10 <11"
+  },
+  "scripts": {
+    "lint": "corepack pnpm --recursive --if-present run lint",
+    "typecheck": "corepack pnpm --recursive --if-present run typecheck",
+    "test": "corepack pnpm --recursive --if-present run test",
+    "build": "tsc --build",
+    "clean": "tsc --build --clean"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.33.0",
+    "@types/node": "22.15.21",
+    "@vitest/coverage-v8": "3.2.4",
+    "eslint": "9.33.0",
+    "typescript": "5.8.3",
+    "typescript-eslint": "8.39.0",
+    "vitest": "3.2.4"
+  }
+}
