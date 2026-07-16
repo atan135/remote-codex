@@ -1,11 +1,11 @@
-import { connect as connectTcp } from "node:net";
-import type { Socket } from "node:net";
+import { Socket } from "node:net";
 
 import {
   CapabilityReplayProtector,
   createServerSigningIdentity,
   decodeFramePayload,
   encodeStreamClosePayload,
+  encodeStreamCreditPayload,
   encodeStreamErrorPayload,
   FrameType,
   StreamBufferBudget,
@@ -25,6 +25,10 @@ export interface EgressAgentStreamSession {
   readonly id: object;
   readonly nowMs: number;
   send(frame: TunnelFrame): boolean;
+  /** 当前 WSS 出站缓冲字节数；未提供时保持兼容的立即发送策略。 */
+  getSendBufferedBytes?(): number | undefined;
+  /** WSS 完成一次发送后触发，供每流队列按轮次恢复，不传递 payload。 */
+  subscribeSendAvailability?(listener: () => void): () => void;
 }
 
 /** 阶段 1 runtime 断开或停止时统一关闭的本地 stream 资源。 */
@@ -40,8 +44,13 @@ export interface EgressAgentStreamResources {
 export interface AgentTcpSocket {
   end(): void;
   destroy(): void;
+  write(data: Uint8Array): boolean;
+  pause(): void;
+  resume(): void;
   setTimeout(timeoutMs: number, listener: () => void): void;
   once(event: "connect" | "error" | "end" | "close", listener: () => void): void;
+  on(event: "data", listener: (data: Uint8Array) => void): void;
+  on(event: "drain", listener: () => void): void;
 }
 
 export interface AgentTcpConnector {
@@ -59,6 +68,18 @@ class NodeTcpSocket implements AgentTcpSocket {
     this.socket.destroy();
   }
 
+  public write(data: Uint8Array): boolean {
+    return this.socket.write(data);
+  }
+
+  public pause(): void {
+    this.socket.pause();
+  }
+
+  public resume(): void {
+    this.socket.resume();
+  }
+
   public setTimeout(timeoutMs: number, listener: () => void): void {
     this.socket.setTimeout(timeoutMs, listener);
   }
@@ -66,12 +87,25 @@ class NodeTcpSocket implements AgentTcpSocket {
   public once(event: "connect" | "error" | "end" | "close", listener: () => void): void {
     this.socket.once(event, listener);
   }
+
+  public on(event: "data", listener: (data: Uint8Array) => void): void;
+  public on(event: "drain", listener: () => void): void;
+  public on(event: "data" | "drain", listener: ((data: Uint8Array) => void) | (() => void)): void {
+    if (event === "data") {
+      this.socket.on("data", listener as (data: Uint8Array) => void);
+      return;
+    }
+
+    this.socket.on("drain", listener as () => void);
+  }
 }
 
 /** 默认实现只允许 node 在严格目标校验后按配置 hostname:443 拨号。 */
 class DefaultAgentTcpConnector implements AgentTcpConnector {
   public connect(destination: Readonly<{ hostname: string; port: 443 }>): AgentTcpSocket {
-    return new NodeTcpSocket(connectTcp({ host: destination.hostname, port: destination.port }));
+    const socket = new Socket();
+    socket.connect({ host: destination.hostname, port: destination.port });
+    return new NodeTcpSocket(socket);
   }
 }
 
@@ -83,6 +117,14 @@ interface ActiveDial {
   socket: AgentTcpSocket | undefined;
   connected: boolean;
   closeRequested: boolean;
+  socketEnded: boolean;
+  producerPaused: boolean;
+  pendingOutboundData: TunnelFrame[];
+  pendingOutboundDataBytes: number;
+  pendingReceiveCreditBytes: number;
+  pendingSocketDrainBytes: number;
+  pendingCloseCode: typeof StreamCloseCode[keyof typeof StreamCloseCode] | undefined;
+  unsubscribeSendAvailability: (() => void) | undefined;
   active: boolean;
 }
 
@@ -118,6 +160,8 @@ export class EgressAgentDialer implements EgressAgentStreamResources {
   private readonly now: () => number;
   private readonly capabilities = new CapabilityReplayProtector();
   private readonly bufferBudget: StreamBufferBudget;
+  /** 只计量仍由 agent 本地队列持有的 TCP -> WSS bytes。 */
+  private readonly pendingQueueBudget: StreamBufferBudget;
   private readonly streams = new Map<string, ActiveDial>();
 
   public constructor(options: {
@@ -131,6 +175,7 @@ export class EgressAgentDialer implements EgressAgentStreamResources {
     this.connector = options.connector ?? new DefaultAgentTcpConnector();
     this.now = options.now ?? Date.now;
     this.bufferBudget = new StreamBufferBudget(this.config.limits);
+    this.pendingQueueBudget = new StreamBufferBudget(this.config.limits);
   }
 
   public get activeStreamCount(): number {
@@ -155,8 +200,16 @@ export class EgressAgentDialer implements EgressAgentStreamResources {
       return;
     }
 
-    // 数据、credit 和状态确认将在阶段 3 接入；此处不允许它们绕过 connecting
-    // 状态或在未经受控的 socket 上写入。
+    if (frame.type === FrameType.STREAM_DATA) {
+      this.handleInboundData(active, frame);
+      return;
+    }
+
+    if (frame.type === FrameType.STREAM_CREDIT) {
+      this.handleInboundCredit(active, frame);
+      return;
+    }
+
     this.fail(active, TunnelErrorCode.PROTOCOL_VIOLATION);
   }
 
@@ -251,6 +304,14 @@ export class EgressAgentDialer implements EgressAgentStreamResources {
       socket: undefined,
       connected: false,
       closeRequested: false,
+      socketEnded: false,
+      producerPaused: false,
+      pendingOutboundData: [],
+      pendingOutboundDataBytes: 0,
+      pendingReceiveCreditBytes: 0,
+      pendingSocketDrainBytes: 0,
+      pendingCloseCode: undefined,
+      unsubscribeSendAvailability: undefined,
       active: true
     };
     this.streams.set(key, active);
@@ -273,6 +334,24 @@ export class EgressAgentDialer implements EgressAgentStreamResources {
 
       active.connected = true;
       socket.setTimeout(this.config.limits.maxIdleMs, () => this.handleIdleTimeout(active));
+      socket.on("data", (data) => this.handleSocketData(active, data));
+      socket.on("drain", () => this.handleSocketDrain(active));
+      this.pauseProducer(active);
+      if (!this.isActive(active)) {
+        return;
+      }
+      active.unsubscribeSendAvailability = active.session.subscribeSendAvailability?.(() => this.flushOnePendingFrame(active));
+
+      const opened = streamFrame(FrameType.STREAM_OPENED, active.streamId, new Uint8Array());
+      const openedResult = active.lifecycle.handleOutbound(opened, active.lifecycle.sessionId, this.now());
+      if (!openedResult.accepted || !this.sendFrame(active, opened)) {
+        this.fail(active, TunnelErrorCode.PEER_DISCONNECTED);
+        return;
+      }
+
+      active.pendingReceiveCreditBytes = active.lifecycle.pendingReceiveCreditBytes;
+      this.flushOnePendingFrame(active);
+      this.syncProducerReadState(active);
     });
     socket.once("error", () => this.fail(active, TunnelErrorCode.CONNECT_FAILED));
     socket.once("end", () => this.handleSocketEnd(active));
@@ -289,6 +368,8 @@ export class EgressAgentDialer implements EgressAgentStreamResources {
     }
 
     active.closeRequested = true;
+    this.pauseProducer(active);
+    this.clearPendingOutboundData(active);
     try {
       active.socket?.end();
     } catch {
@@ -323,7 +404,8 @@ export class EgressAgentDialer implements EgressAgentStreamResources {
     }
 
     if (active.connected) {
-      this.closeFromSocket(active);
+      active.socketEnded = true;
+      this.requestCloseFromSocket(active, StreamCloseCode.NORMAL);
       return;
     }
 
@@ -340,7 +422,282 @@ export class EgressAgentDialer implements EgressAgentStreamResources {
       return;
     }
 
+    if (active.socketEnded && active.pendingCloseCode !== undefined) {
+      return;
+    }
+
     this.fail(active, TunnelErrorCode.CONNECT_FAILED);
+  }
+
+  private handleSocketData(active: ActiveDial, data: Uint8Array): void {
+    if (!this.isActive(active) || !active.connected || active.closeRequested || active.socketEnded) {
+      return;
+    }
+
+    if (data.byteLength === 0) {
+      return;
+    }
+
+    if (!this.canBufferBytes(active, data.byteLength) || !this.pendingQueueBudget.canReserve(active.streamKey, data.byteLength)) {
+      this.fail(active, TunnelErrorCode.FLOW_CONTROL_VIOLATION);
+      return;
+    }
+
+    for (let offset = 0; offset < data.byteLength; offset += this.config.limits.maxFramePayloadBytes) {
+      const payload = data.subarray(offset, Math.min(offset + this.config.limits.maxFramePayloadBytes, data.byteLength));
+      if (!this.pendingQueueBudget.reserve(active.streamKey, payload.byteLength)) {
+        this.fail(active, TunnelErrorCode.FLOW_CONTROL_VIOLATION);
+        return;
+      }
+
+      active.pendingOutboundData.push(streamFrame(FrameType.STREAM_DATA, active.streamId, payload));
+      active.pendingOutboundDataBytes += payload.byteLength;
+    }
+
+    this.flushOnePendingFrame(active);
+    this.syncProducerReadState(active);
+  }
+
+  private handleSocketDrain(active: ActiveDial): void {
+    if (!this.isActive(active) || active.pendingSocketDrainBytes === 0) {
+      return;
+    }
+
+    const bytes = active.pendingSocketDrainBytes;
+    active.pendingSocketDrainBytes = 0;
+    this.queueReceiveCredit(active, bytes);
+  }
+
+  private handleInboundData(active: ActiveDial, frame: TunnelFrame): void {
+    const payload = decodeFramePayload(frame);
+    if (!(payload instanceof Uint8Array) || payload.byteLength === 0) {
+      this.fail(active, TunnelErrorCode.PROTOCOL_VIOLATION);
+      return;
+    }
+
+    // lifecycle 已确认数据和 agent 本地待发队列共同构成实际内存水位；两个方向
+    // 都必须先经过组合准入，不能让慢 WSS 队列绕开 inbound data 的聚合限制。
+    if (!this.canBufferBytes(active, payload.byteLength)) {
+      this.fail(active, TunnelErrorCode.FLOW_CONTROL_VIOLATION);
+      return;
+    }
+
+    const result = active.lifecycle.handleInbound(frame, active.lifecycle.sessionId, this.now());
+    if (!result.accepted) {
+      this.fail(active, result.errorCode ?? TunnelErrorCode.PROTOCOL_VIOLATION);
+      return;
+    }
+
+    try {
+      if (active.socket?.write(payload) === false) {
+        active.pendingSocketDrainBytes += payload.byteLength;
+        return;
+      }
+    } catch {
+      this.fail(active, TunnelErrorCode.CONNECT_FAILED);
+      return;
+    }
+
+    this.queueReceiveCredit(active, payload.byteLength);
+  }
+
+  private handleInboundCredit(active: ActiveDial, frame: TunnelFrame): void {
+    const result = active.lifecycle.handleInbound(frame, active.lifecycle.sessionId, this.now());
+    if (!result.accepted) {
+      this.fail(active, result.errorCode ?? TunnelErrorCode.FLOW_CONTROL_VIOLATION);
+      return;
+    }
+
+    this.flushOnePendingFrame(active);
+    this.syncProducerReadState(active);
+  }
+
+  private queueReceiveCredit(active: ActiveDial, bytes: number): void {
+    const queued = active.lifecycle.queueReceiveCredit(bytes, this.now());
+    if (!queued.accepted) {
+      this.fail(active, queued.errorCode ?? TunnelErrorCode.PROTOCOL_VIOLATION);
+      return;
+    }
+
+    active.pendingReceiveCreditBytes += bytes;
+    this.flushOnePendingFrame(active);
+  }
+
+  /** 每次 WSS 可写只取每流一个待发送项，避免单一慢用户流独占发送机会。 */
+  private flushOnePendingFrame(active: ActiveDial): void {
+    if (!this.isActive(active) || !active.connected) {
+      return;
+    }
+
+    if (active.pendingReceiveCreditBytes > 0) {
+      const bytes = active.pendingReceiveCreditBytes;
+      const credit = streamFrame(
+        FrameType.STREAM_CREDIT,
+        active.streamId,
+        encodeStreamCreditPayload({ bytes })
+      );
+      if (this.shouldDelayForWss(active, credit.payload.byteLength)) {
+        this.syncProducerReadState(active);
+        return;
+      }
+      const result = active.lifecycle.handleOutbound(credit, active.lifecycle.sessionId, this.now());
+      if (!result.accepted || !this.sendFrame(active, credit)) {
+        this.fail(active, result.errorCode ?? TunnelErrorCode.PEER_DISCONNECTED);
+        return;
+      }
+
+      active.pendingReceiveCreditBytes = 0;
+      this.syncProducerReadState(active);
+      return;
+    }
+
+    const outbound = active.pendingOutboundData[0];
+    if (outbound !== undefined) {
+      if (this.shouldDelayForWss(active, outbound.payload.byteLength)) {
+        this.syncProducerReadState(active);
+        return;
+      }
+
+      if (active.lifecycle.availableSendCreditBytes < outbound.payload.byteLength) {
+        this.syncProducerReadState(active);
+        return;
+      }
+
+      // 将本地队列的占用转移给 lifecycle：先释放队列计量，再 reserve lifecycle，
+      // 组合水位保持不变，不会在一次转移内出现双重记账峰值。
+      active.pendingOutboundData.shift();
+      active.pendingOutboundDataBytes -= outbound.payload.byteLength;
+      this.pendingQueueBudget.release(active.streamKey, outbound.payload.byteLength);
+      const result = active.lifecycle.handleOutbound(outbound, active.lifecycle.sessionId, this.now());
+      if (!result.accepted) {
+        this.fail(active, result.errorCode ?? TunnelErrorCode.FLOW_CONTROL_VIOLATION);
+        return;
+      }
+
+      if (!this.sendFrame(active, outbound)) {
+        this.fail(active, TunnelErrorCode.PEER_DISCONNECTED);
+        return;
+      }
+
+      this.syncProducerReadState(active);
+      return;
+    }
+
+    if (active.pendingCloseCode !== undefined) {
+      const code = active.pendingCloseCode;
+      const closeFrame = streamFrame(
+        FrameType.STREAM_CLOSE,
+        active.streamId,
+        encodeStreamClosePayload({ code })
+      );
+      if (this.shouldDelayForWss(active, closeFrame.payload.byteLength)) {
+        return;
+      }
+      const result = active.lifecycle.handleOutbound(closeFrame, active.lifecycle.sessionId, this.now());
+      if (!result.accepted || !this.sendFrame(active, closeFrame)) {
+        this.remove(active, true);
+        return;
+      }
+
+      active.pendingCloseCode = undefined;
+      active.lifecycle.completeClose(this.now());
+      this.remove(active, true);
+    }
+  }
+
+  private requestCloseFromSocket(
+    active: ActiveDial,
+    code: typeof StreamCloseCode[keyof typeof StreamCloseCode]
+  ): void {
+    const requested = active.lifecycle.requestClose(code, this.now());
+    if (!requested.accepted) {
+      this.fail(active, TunnelErrorCode.PROTOCOL_VIOLATION);
+      return;
+    }
+
+    active.pendingCloseCode = code;
+    // EOF 后不再接收新的对端数据，尚未送出的初始/补充 credit 不应在 closing
+    // 状态下补发，否则会把正常关闭变成协议错误。
+    active.pendingReceiveCreditBytes = 0;
+    this.pauseProducer(active);
+    this.flushOnePendingFrame(active);
+  }
+
+  private shouldDelayForWss(active: ActiveDial, nextPayloadBytes = 0): boolean {
+    const bufferedBytes = active.session.getSendBufferedBytes?.();
+    return (
+      bufferedBytes !== undefined &&
+      (!Number.isSafeInteger(bufferedBytes) ||
+        bufferedBytes < 0 ||
+        bufferedBytes > this.config.limits.maxBufferedBytesPerStream - nextPayloadBytes)
+    );
+  }
+
+  /** lifecycle 和 agent 本地队列的总占用必须始终不超过同一组部署限制。 */
+  private canBufferBytes(active: ActiveDial, bytes: number): boolean {
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) {
+      return false;
+    }
+
+    const streamBufferedBytes = active.lifecycle.bufferedBytes + active.pendingOutboundDataBytes;
+    const aggregateBufferedBytes = this.bufferBudget.totalBufferedBytes + this.pendingQueueBudget.totalBufferedBytes;
+    return (
+      bytes <= this.config.limits.maxBufferedBytesPerStream - streamBufferedBytes &&
+      bytes <= this.config.limits.maxAggregateBufferedBytes - aggregateBufferedBytes
+    );
+  }
+
+  private sendFrame(active: ActiveDial, frame: TunnelFrame): boolean {
+    try {
+      return active.session.send(frame);
+    } catch {
+      return false;
+    }
+  }
+
+  private syncProducerReadState(active: ActiveDial): void {
+    if (!this.isActive(active) || active.closeRequested || active.socketEnded || active.pendingCloseCode !== undefined) {
+      this.pauseProducer(active);
+      return;
+    }
+
+    if (active.pendingOutboundData.length > 0 || !active.lifecycle.canReadFromProducer || this.shouldDelayForWss(active, 1)) {
+      this.pauseProducer(active);
+      return;
+    }
+
+    if (!active.producerPaused) {
+      return;
+    }
+
+    try {
+      active.socket?.resume();
+      active.producerPaused = false;
+    } catch {
+      this.fail(active, TunnelErrorCode.CONNECT_FAILED);
+    }
+  }
+
+  private pauseProducer(active: ActiveDial): void {
+    if (active.producerPaused) {
+      return;
+    }
+
+    try {
+      active.socket?.pause();
+      active.producerPaused = true;
+    } catch {
+      this.fail(active, TunnelErrorCode.CONNECT_FAILED);
+    }
+  }
+
+  private clearPendingOutboundData(active: ActiveDial): void {
+    if (active.pendingOutboundDataBytes > 0) {
+      this.pendingQueueBudget.releaseAll(active.streamKey);
+    }
+
+    active.pendingOutboundData.length = 0;
+    active.pendingOutboundDataBytes = 0;
   }
 
   private fail(active: ActiveDial, code: typeof TunnelErrorCode[keyof typeof TunnelErrorCode]): void {
@@ -349,29 +706,11 @@ export class EgressAgentDialer implements EgressAgentStreamResources {
     }
 
     active.lifecycle.fail(code, this.now());
-    this.sendError(active.session, active.streamId, code);
-    this.remove(active, true);
-  }
-
-  private closeFromSocket(active: ActiveDial): void {
-    if (!this.isActive(active)) {
-      return;
+    try {
+      this.sendError(active.session, active.streamId, code);
+    } catch {
+      // WSS 已不可写时仍须完成本地流和 TCP 的幂等清理。
     }
-
-    const closeFrame = streamFrame(
-      FrameType.STREAM_CLOSE,
-      active.streamId,
-      encodeStreamClosePayload({ code: StreamCloseCode.NORMAL })
-    );
-    const requested = active.lifecycle.requestClose(StreamCloseCode.NORMAL, this.now());
-
-    if (!requested.accepted) {
-      this.fail(active, TunnelErrorCode.PROTOCOL_VIOLATION);
-      return;
-    }
-
-    active.session.send(closeFrame);
-    active.lifecycle.completeClose(this.now());
     this.remove(active, true);
   }
 
@@ -398,6 +737,9 @@ export class EgressAgentDialer implements EgressAgentStreamResources {
 
     active.active = false;
     this.streams.delete(active.streamKey);
+    this.clearPendingOutboundData(active);
+    active.unsubscribeSendAvailability?.();
+    active.unsubscribeSendAvailability = undefined;
     active.lifecycle.onSessionDisconnected(active.lifecycle.sessionId, this.now());
 
     if (destroySocket) {

@@ -38,17 +38,29 @@ const initialTlsVerificationSetting = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
 class FakeSocket implements AgentSocket {
   public readonly sent: Uint8Array[] = [];
   public readonly closeCalls: Array<readonly [number | undefined, string | undefined]> = [];
+  public sendBufferedBytes = 0;
+  public throwOnSend = false;
+  public throwOnClose = false;
+  public throwOnGetSendBufferedBytes = false;
+  public throwOnSubscribeSendAvailability = false;
+  private readonly sendAvailabilityListeners = new Set<() => void>();
   private openListener: (() => void) | undefined;
   private messageListener: ((data: Uint8Array | undefined, isBinary: boolean) => void) | undefined;
   private closeListener: ((code: number, reason: string) => void) | undefined;
   private errorListener: (() => void) | undefined;
 
   public send(data: Uint8Array): void {
+    if (this.throwOnSend) {
+      throw new Error("WSS send failed");
+    }
     this.sent.push(Uint8Array.from(data));
   }
 
   public close(code?: number, reason?: string): void {
     this.closeCalls.push([code, reason]);
+    if (this.throwOnClose) {
+      throw new Error("WSS close failed");
+    }
     this.emitClose(code ?? 1000, reason ?? "");
   }
 
@@ -68,6 +80,23 @@ class FakeSocket implements AgentSocket {
     this.errorListener = listener;
   }
 
+  public getSendBufferedBytes(): number {
+    if (this.throwOnGetSendBufferedBytes) {
+      throw new Error("WSS buffered amount unavailable");
+    }
+    return this.sendBufferedBytes;
+  }
+
+  public onSendAvailability(listener: () => void): () => void {
+    if (this.throwOnSubscribeSendAvailability) {
+      throw new Error("WSS availability unavailable");
+    }
+    this.sendAvailabilityListeners.add(listener);
+    return (): void => {
+      this.sendAvailabilityListeners.delete(listener);
+    };
+  }
+
   public emitOpen(): void {
     this.openListener?.();
   }
@@ -84,6 +113,12 @@ class FakeSocket implements AgentSocket {
 
   public emitError(): void {
     this.errorListener?.();
+  }
+
+  public emitSendAvailability(): void {
+    for (const listener of this.sendAvailabilityListeners) {
+      listener();
+    }
   }
 }
 
@@ -106,10 +141,25 @@ class FakeTcpSocket implements AgentTcpSocket {
 
   public destroy(): void {}
 
+  public write(): boolean {
+    return true;
+  }
+
+  public pause(): void {}
+
+  public resume(): void {}
+
   public setTimeout(): void {}
 
   public once(event: "connect" | "error" | "end" | "close", listener: () => void): void {
     this.listeners.set(event, listener);
+  }
+
+  public on(event: "data", listener: (data: Uint8Array) => void): void;
+  public on(event: "drain", listener: () => void): void;
+  public on(event: "data" | "drain", listener: ((data: Uint8Array) => void) | (() => void)): void {
+    void event;
+    void listener;
   }
 }
 
@@ -317,6 +367,177 @@ describe("egress agent persistent WSS session", () => {
 
     expect(connector.calls).toEqual([{ hostname: config.allowedDestination.hostname, port: 443 }]);
     expect(runtime.getStatus()).toEqual({ state: "online", reconnectAttempts: 0 });
+  });
+
+  it("向 stream 资源暴露当前 WSS 缓冲和受当前会话约束的发送可用通知", () => {
+    const sockets = new FakeSocketFactory();
+    const streamResources = {
+      closeAll: vi.fn(),
+      handleFrame: vi.fn()
+    };
+    const runtime = new EgressAgentRuntime({
+      config: createConfig(),
+      ...createIdentity(),
+      origin: "https://agent.example.test",
+      socketFactory: sockets,
+      streamResources,
+      now: () => 1_000,
+      random: () => 1,
+      randomBytes: (size) => Uint8Array.from({ length: size }, (_, index) => index + 1)
+    });
+
+    runtime.start();
+    const socket = sockets.sockets[0];
+    if (socket === undefined) {
+      throw new Error("expected WSS socket");
+    }
+    authenticate(socket, 1_000);
+    socket.sendBufferedBytes = 512;
+    socket.emitMessage(
+      encodeFrame(streamFrame(FrameType.STREAM_OPENED, createStreamId(), new Uint8Array()))
+    );
+
+    const call = streamResources.handleFrame.mock.calls[0];
+    if (call === undefined) {
+      throw new Error("expected stream frame dispatch");
+    }
+    const session = call[0];
+    if (session === undefined || typeof session !== "object" || !("getSendBufferedBytes" in session)) {
+      throw new Error("expected WSS-aware stream session");
+    }
+    const getSendBufferedBytes = session.getSendBufferedBytes;
+    const subscribeSendAvailability = "subscribeSendAvailability" in session ? session.subscribeSendAvailability : undefined;
+    if (typeof getSendBufferedBytes !== "function" || typeof subscribeSendAvailability !== "function") {
+      throw new Error("expected WSS backpressure methods");
+    }
+    expect(getSendBufferedBytes()).toBe(512);
+
+    const available = vi.fn();
+    subscribeSendAvailability(available);
+    socket.emitSendAvailability();
+    expect(available).toHaveBeenCalledTimes(1);
+
+    socket.sendBufferedBytes = -1;
+    expect(getSendBufferedBytes()).toBeUndefined();
+    socket.throwOnGetSendBufferedBytes = true;
+    expect(getSendBufferedBytes()).toBeUndefined();
+    socket.throwOnSubscribeSendAvailability = true;
+    const unavailable = vi.fn();
+    subscribeSendAvailability(unavailable);
+    socket.emitSendAvailability();
+    expect(unavailable).not.toHaveBeenCalled();
+
+    socket.emitClose();
+    socket.emitSendAvailability();
+    expect(available).toHaveBeenCalledTimes(2);
+  });
+
+  it("将 WSS send、close 和认证随机源异常收敛为受限断线状态", () => {
+    vi.useFakeTimers();
+    const heartbeatSockets = new FakeSocketFactory();
+    const heartbeatResources = { closeAll: vi.fn() };
+    const heartbeatRuntime = new EgressAgentRuntime({
+      config: createConfig(),
+      ...createIdentity(),
+      origin: "https://agent.example.test",
+      socketFactory: heartbeatSockets,
+      streamResources: heartbeatResources,
+      now: () => 1_000,
+      random: () => 1,
+      randomBytes: (size) => Uint8Array.from({ length: size }, (_, index) => index + 1)
+    });
+    heartbeatRuntime.start();
+    const heartbeatSocket = heartbeatSockets.sockets[0];
+    if (heartbeatSocket === undefined) {
+      throw new Error("expected heartbeat socket");
+    }
+    authenticate(heartbeatSocket, 1_000);
+    heartbeatSocket.throwOnSend = true;
+    vi.advanceTimersByTime(100);
+    expect(heartbeatResources.closeAll).toHaveBeenCalledTimes(1);
+    expect(heartbeatRuntime.getStatus()).toEqual({ state: "backoff", reconnectAttempts: 1, lastErrorCode: "WSS_CONNECTION_FAILED" });
+
+    const closeSockets = new FakeSocketFactory();
+    const closeResources = { closeAll: vi.fn() };
+    const closeRuntime = new EgressAgentRuntime({
+      config: createConfig(),
+      ...createIdentity(),
+      origin: "https://agent.example.test",
+      socketFactory: closeSockets,
+      streamResources: closeResources,
+      random: () => 1
+    });
+    closeRuntime.start();
+    const closeSocket = closeSockets.sockets[0];
+    if (closeSocket === undefined) {
+      throw new Error("expected close socket");
+    }
+    closeSocket.throwOnClose = true;
+    closeSocket.emitError();
+    expect(closeResources.closeAll).toHaveBeenCalledTimes(1);
+    expect(closeRuntime.getStatus()).toEqual({ state: "backoff", reconnectAttempts: 1, lastErrorCode: "WSS_CONNECTION_FAILED" });
+
+    const authenticationSockets = new FakeSocketFactory();
+    const authenticationRuntime = new EgressAgentRuntime({
+      config: createConfig(),
+      ...createIdentity(),
+      origin: "https://agent.example.test",
+      socketFactory: authenticationSockets,
+      randomBytes: () => {
+        throw new Error("random source failed");
+      }
+    });
+    authenticationRuntime.start();
+    authenticationSockets.sockets[0]?.emitOpen();
+    expect(authenticationRuntime.getStatus()).toEqual({ state: "offline", reconnectAttempts: 0, lastErrorCode: "AUTH_FAILED" });
+  });
+
+  it("拒绝冲突依赖，并在重复 start、停止和取消状态订阅时保持单一连接", () => {
+    const identity = createIdentity();
+    const sockets = new FakeSocketFactory();
+    expect(
+      () =>
+        new EgressAgentRuntime({
+          config: createConfig(),
+          ...identity,
+          origin: "https://agent.example.test",
+          socketFactory: sockets,
+          streamResources: { closeAll: () => undefined },
+          capabilityServerIdentity: createServerCapabilityCredentials().identity
+        })
+    ).toThrow("AGENT_STREAM_RESOURCES_CONFLICT");
+    expect(
+      () =>
+        new EgressAgentRuntime({
+          config: createConfig(),
+          ...identity,
+          origin: "https://agent.example.test",
+          socketFactory: sockets,
+          connector: new FakeTcpConnector()
+        })
+    ).toThrow("AGENT_CAPABILITY_IDENTITY_REQUIRED");
+
+    const streamResources = { closeAll: vi.fn() };
+    const runtime = new EgressAgentRuntime({
+      config: createConfig(),
+      ...createIdentity(),
+      origin: "https://agent.example.test",
+      socketFactory: sockets,
+      streamResources
+    });
+    const states = vi.fn();
+    const unsubscribe = runtime.subscribeStatus(states);
+    runtime.start();
+    runtime.start();
+    expect(sockets.sockets).toHaveLength(1);
+    unsubscribe();
+    sockets.sockets[0]!.throwOnClose = true;
+    runtime.stop();
+    runtime.stop();
+    expect(streamResources.closeAll).toHaveBeenCalledTimes(1);
+    expect(runtime.getStatus()).toEqual({ state: "stopped", reconnectAttempts: 0 });
+    expect(states).toHaveBeenCalledTimes(2);
+    expect(() => runtime.start()).toThrow("AGENT_RUNTIME_STOPPED");
   });
 
   it("does not retry an authentication failure", () => {

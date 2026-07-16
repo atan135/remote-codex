@@ -50,6 +50,12 @@ export interface AgentSocket {
   onMessage(listener: (data: Uint8Array | undefined, isBinary: boolean) => void): void;
   onClose(listener: (code: number, reason: string) => void): void;
   onError(listener: () => void): void;
+  /**
+   * WSS 发送端的可观测背压。运行时只把该数值交给受限 stream 资源，绝不暴露
+   * 任何帧内容；测试适配器可以省略这两个能力。
+   */
+  getSendBufferedBytes?(): number;
+  onSendAvailability?(listener: () => void): () => void;
 }
 
 export interface AgentSocketFactory {
@@ -124,10 +130,12 @@ function safeCloseReason(reason: Buffer): string {
 }
 
 class WsAgentSocket implements AgentSocket {
+  private readonly sendAvailabilityListeners = new Set<() => void>();
+
   public constructor(private readonly socket: WebSocket) {}
 
   public send(data: Uint8Array): void {
-    this.socket.send(data, { binary: true });
+    this.socket.send(data, { binary: true }, () => this.notifySendAvailability());
   }
 
   public close(code?: number, reason?: string): void {
@@ -148,6 +156,27 @@ class WsAgentSocket implements AgentSocket {
 
   public onError(listener: () => void): void {
     this.socket.once("error", listener);
+  }
+
+  public getSendBufferedBytes(): number {
+    return this.socket.bufferedAmount;
+  }
+
+  public onSendAvailability(listener: () => void): () => void {
+    this.sendAvailabilityListeners.add(listener);
+    return (): void => {
+      this.sendAvailabilityListeners.delete(listener);
+    };
+  }
+
+  private notifySendAvailability(): void {
+    for (const listener of this.sendAvailabilityListeners) {
+      try {
+        listener();
+      } catch {
+        // stream 资源的调度失败不能影响认证 WSS 的关闭与重连状态机。
+      }
+    }
   }
 }
 
@@ -487,7 +516,9 @@ export class EgressAgentRuntime {
         const session: EgressAgentStreamSession = {
           id: connection,
           nowMs: this.now(),
-          send: (outboundFrame) => this.send(connection, outboundFrame)
+          send: (outboundFrame) => this.send(connection, outboundFrame),
+          getSendBufferedBytes: (): number | undefined => this.getSendBufferedBytes(connection),
+          subscribeSendAvailability: (listener): (() => void) => this.subscribeSendAvailability(connection, listener)
         };
         this.streamResources.handleFrame(session, frame);
         return;
@@ -604,6 +635,39 @@ export class EgressAgentRuntime {
 
     connection.socket.send(encodeFrame(frame));
     return true;
+  }
+
+  private getSendBufferedBytes(connection: AgentConnection): number | undefined {
+    if (!this.isActive(connection)) {
+      return undefined;
+    }
+
+    try {
+      const bufferedBytes = connection.socket.getSendBufferedBytes?.();
+      return bufferedBytes === undefined || (Number.isSafeInteger(bufferedBytes) && bufferedBytes >= 0)
+        ? bufferedBytes
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private subscribeSendAvailability(connection: AgentConnection, listener: () => void): () => void {
+    const subscribe = connection.socket.onSendAvailability;
+
+    if (!this.isActive(connection) || subscribe === undefined) {
+      return (): void => undefined;
+    }
+
+    try {
+      return subscribe.call(connection.socket, () => {
+        if (this.isActive(connection)) {
+          listener();
+        }
+      });
+    } catch {
+      return (): void => undefined;
+    }
   }
 
   private closeAllStreams(): boolean {
