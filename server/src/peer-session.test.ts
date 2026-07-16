@@ -375,6 +375,31 @@ describe("WSS peer registration and session management", () => {
     await waitFor(() => runningServer?.peerSessions.getSession(edgeSession?.peerId ?? "")?.lastHeartbeatSequence === 7);
   });
 
+  it("仅暴露已认证 peer 的 WSS 队列元数据，并在发送完成后通知 relay 监听器", async () => {
+    const fixture = createFixture();
+    const url = await startServer([{ identity: fixture.agentIdentity }]);
+    const connected = await authenticate(url, fixture.agentIdentity, fixture.agentPrivateKey, "egress-agent", nonce(8));
+    const manager = runningServer!.peerSessions;
+    const peerId = manager.getActiveSessions()[0]!.peerId;
+    const availability: string[] = [];
+    const unsubscribeThrowingListener = manager.subscribeSendAvailability(() => {
+      throw new Error("listener failure must not affect the session");
+    });
+    const unsubscribe = manager.subscribeSendAvailability((availablePeerId) => availability.push(availablePeerId));
+
+    expect(manager.getSendBufferedBytes("unknown-peer")).toBeUndefined();
+    expect(manager.getSendBufferedBytes(peerId)).toBe(0);
+    const received = nextFrame(connected.socket);
+    expect(
+      manager.sendFrame(peerId, streamFrame(FrameType.STREAM_OPENED, Uint8Array.from({ length: 16 }, () => 1), new Uint8Array()))
+    ).toBe(true);
+    expect((await received).type).toBe(FrameType.STREAM_OPENED);
+    await waitFor(() => availability.includes(peerId));
+
+    unsubscribeThrowingListener();
+    unsubscribe();
+  });
+
   it("rejects role mismatches, expired identities, bad signatures, and unsupported protocol versions", async () => {
     const fixture = createFixture();
     const expiredFixture = createFixture();

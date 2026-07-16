@@ -9,6 +9,7 @@ import {
   createServerSigningIdentity,
   decodeFramePayload,
   encodeStreamClosePayload,
+  encodeStreamCreditPayload,
   encodeStreamErrorPayload,
   encodeStreamOpenPayload,
   FrameType,
@@ -58,6 +59,9 @@ class FakePeerSessions implements StreamPeerSessionGateway {
   private readonly sessions = new Map<string, AuthenticatedPeerSession>();
   private readonly streamListeners = new Set<PeerSessionStreamFrameListener>();
   private readonly removalListeners = new Set<PeerSessionRemovalListener>();
+  private readonly sendAvailabilityListeners = new Set<(peerId: string) => void>();
+  private readonly bufferedBytesByPeer = new Map<string, number>();
+  private readonly failNextSendByPeer = new Set<string>();
   public readonly sent: SentFrame[] = [];
 
   public connect(session: AuthenticatedPeerSession): void {
@@ -75,6 +79,9 @@ class FakePeerSessions implements StreamPeerSessionGateway {
 
   public sendFrame(peerId: string, frame: TunnelFrame): boolean {
     if (!this.sessions.has(peerId)) {
+      return false;
+    }
+    if (this.failNextSendByPeer.delete(peerId)) {
       return false;
     }
     this.sent.push(
@@ -103,6 +110,31 @@ class FakePeerSessions implements StreamPeerSessionGateway {
     return (): void => {
       this.removalListeners.delete(listener);
     };
+  }
+
+  public subscribeSendAvailability(listener: (peerId: string) => void): () => void {
+    this.sendAvailabilityListeners.add(listener);
+    return (): void => {
+      this.sendAvailabilityListeners.delete(listener);
+    };
+  }
+
+  public getSendBufferedBytes(peerId: string): number | undefined {
+    return this.sessions.has(peerId) ? (this.bufferedBytesByPeer.get(peerId) ?? 0) : undefined;
+  }
+
+  public setSendBufferedBytes(peerId: string, bytes: number): void {
+    this.bufferedBytesByPeer.set(peerId, bytes);
+  }
+
+  public notifySendAvailable(peerId: string): void {
+    for (const listener of this.sendAvailabilityListeners) {
+      listener(peerId);
+    }
+  }
+
+  public failNextSend(peerId: string): void {
+    this.failNextSendByPeer.add(peerId);
   }
 
   public emit(peerId: string, frame: TunnelFrame): void {
@@ -261,6 +293,10 @@ function edgeOpen(id: Uint8Array, hostname = DEFAULT_ALLOWED_DESTINATION.hostnam
     id,
     encodeStreamOpenPayload({ hostname, port: 443, capability: Uint8Array.of(1) })
   );
+}
+
+function credit(id: Uint8Array, bytes: number): TunnelFrame {
+  return streamFrame(FrameType.STREAM_CREDIT, id, encodeStreamCreditPayload({ bytes }));
 }
 
 function errorCode(frame: TunnelFrame): TunnelErrorCode {
@@ -574,5 +610,448 @@ describe("server stream.open 授权与 capability 签发", () => {
       TunnelErrorCode.AUTH_UNAUTHORIZED
     );
     denied.close();
+  });
+
+  it("在 opened 后按所有权双向转发 data 与 credit，并保持 edge 和内部 stream ID 隔离及字节顺序", () => {
+    const fixture = createFixture();
+    const peers = new FakePeerSessions();
+    const alicePeer = edgeSession("edge-peer-alice", fixture.alice);
+    const agentPeer = agentSession("agent-peer-shared", fixture.sharedAgent);
+    peers.connect(alicePeer);
+    peers.connect(agentPeer);
+    const coordinator = new StreamOpenCoordinator({
+      peerSessions: peers,
+      authorizationRegistry: createRegistry(fixture),
+      signingCredentials: fixture.signingCredentials,
+      allowedDestination: DEFAULT_ALLOWED_DESTINATION
+    });
+    const edgeId = streamId(1);
+
+    peers.emit(alicePeer.peerId, edgeOpen(edgeId));
+    const ownership = coordinator.getActiveStreams()[0]!;
+    peers.emit(agentPeer.peerId, streamFrame(FrameType.STREAM_OPENED, ownership.streamId, new Uint8Array()));
+    peers.emit(agentPeer.peerId, credit(ownership.streamId, 64 * 1024));
+    peers.emit(alicePeer.peerId, credit(edgeId, 64 * 1024));
+    peers.emit(alicePeer.peerId, streamFrame(FrameType.STREAM_DATA, edgeId, Uint8Array.of(1, 2, 3)));
+    peers.emit(agentPeer.peerId, streamFrame(FrameType.STREAM_DATA, ownership.streamId, Uint8Array.of(4, 5)));
+
+    const agentData = peers.framesFor(agentPeer.peerId, FrameType.STREAM_DATA);
+    const edgeData = peers.framesFor(alicePeer.peerId, FrameType.STREAM_DATA);
+    expect(agentData).toHaveLength(1);
+    expect(agentData[0]?.streamId).toEqual(ownership.streamId);
+    expect(agentData[0]?.payload).toEqual(Uint8Array.of(1, 2, 3));
+    expect(edgeData).toHaveLength(1);
+    expect(edgeData[0]?.streamId).toEqual(edgeId);
+    expect(edgeData[0]?.payload).toEqual(Uint8Array.of(4, 5));
+    expect(peers.framesFor(alicePeer.peerId, FrameType.STREAM_CREDIT).at(-1)?.streamId).toEqual(edgeId);
+    expect(peers.framesFor(agentPeer.peerId, FrameType.STREAM_CREDIT).at(-1)?.streamId).toEqual(ownership.streamId);
+
+    peers.emit(agentPeer.peerId, credit(ownership.streamId, 3));
+    peers.emit(alicePeer.peerId, credit(edgeId, 2));
+    expect(coordinator.getActiveStreams()[0]?.bufferedBytes).toBe(0);
+    coordinator.close();
+  });
+
+  it("拒绝同一共享 agent 上另一 edge 用户伪造的 stream ID，且不影响真实所有者", () => {
+    const fixture = createFixture();
+    const peers = new FakePeerSessions();
+    const alicePeer = edgeSession("edge-peer-alice", fixture.alice);
+    const bobPeer = edgeSession("edge-peer-bob", fixture.bob);
+    const agentPeer = agentSession("agent-peer-shared", fixture.sharedAgent);
+    peers.connect(alicePeer);
+    peers.connect(bobPeer);
+    peers.connect(agentPeer);
+    const coordinator = new StreamOpenCoordinator({
+      peerSessions: peers,
+      authorizationRegistry: createRegistry(fixture),
+      signingCredentials: fixture.signingCredentials,
+      allowedDestination: DEFAULT_ALLOWED_DESTINATION
+    });
+    const aliceId = streamId(17);
+    const bobId = streamId(49);
+
+    peers.emit(alicePeer.peerId, edgeOpen(aliceId));
+    peers.emit(bobPeer.peerId, edgeOpen(bobId));
+    const aliceStream = coordinator.getActiveStreams().find((stream) => stream.edgeUserId === fixture.alice.edgeUserId)!;
+    const bobStream = coordinator.getActiveStreams().find((stream) => stream.edgeUserId === fixture.bob.edgeUserId)!;
+    peers.emit(agentPeer.peerId, streamFrame(FrameType.STREAM_OPENED, aliceStream.streamId, new Uint8Array()));
+    peers.emit(agentPeer.peerId, streamFrame(FrameType.STREAM_OPENED, bobStream.streamId, new Uint8Array()));
+
+    peers.emit(bobPeer.peerId, credit(aliceId, 1));
+    expect(errorCode(peers.framesFor(bobPeer.peerId, FrameType.STREAM_ERROR).at(-1)!)).toBe(
+      TunnelErrorCode.PROTOCOL_VIOLATION
+    );
+    expect(coordinator.getActiveStreams().map((stream) => stream.edgeUserId).sort()).toEqual([
+      fixture.alice.edgeUserId,
+      fixture.bob.edgeUserId
+    ]);
+    expect(peers.framesFor(agentPeer.peerId, FrameType.STREAM_CREDIT)).toHaveLength(0);
+    coordinator.close();
+  });
+
+  it("畸形 stream payload 只拒绝未建流请求或关闭对应流，不影响 WSS peer 会话", () => {
+    const fixture = createFixture();
+    const peers = new FakePeerSessions();
+    const alicePeer = edgeSession("edge-peer-alice", fixture.alice);
+    const agentPeer = agentSession("agent-peer-shared", fixture.sharedAgent);
+    peers.connect(alicePeer);
+    peers.connect(agentPeer);
+    const coordinator = new StreamOpenCoordinator({
+      peerSessions: peers,
+      authorizationRegistry: createRegistry(fixture),
+      signingCredentials: fixture.signingCredentials,
+      allowedDestination: DEFAULT_ALLOWED_DESTINATION
+    });
+    const malformedEdgeId = streamId(25);
+    const malformedOpen = {
+      type: FrameType.STREAM_OPEN,
+      flags: 0,
+      streamId: malformedEdgeId,
+      payload: new Uint8Array()
+    } as unknown as TunnelFrame;
+
+    peers.emit(alicePeer.peerId, malformedOpen);
+    expect(errorCode(peers.framesFor(alicePeer.peerId, FrameType.STREAM_REJECTED).at(-1)!)).toBe(
+      TunnelErrorCode.PROTOCOL_VIOLATION
+    );
+    expect(coordinator.getActiveStreams()).toHaveLength(0);
+
+    const edgeId = streamId(73);
+    peers.emit(alicePeer.peerId, edgeOpen(edgeId));
+    const ownership = coordinator.getActiveStreams()[0]!;
+    const malformedCredit = {
+      type: FrameType.STREAM_CREDIT,
+      flags: 0,
+      streamId: ownership.streamId,
+      payload: Uint8Array.of(1)
+    } as unknown as TunnelFrame;
+    peers.emit(agentPeer.peerId, malformedCredit);
+
+    expect(errorCode(peers.framesFor(alicePeer.peerId, FrameType.STREAM_ERROR).at(-1)!)).toBe(
+      TunnelErrorCode.PROTOCOL_VIOLATION
+    );
+    expect(coordinator.getActiveStreams()).toHaveLength(0);
+    coordinator.close();
+  });
+
+  it("edge 断开时关闭 agent 侧对应 stream，agent 断开时仅通知存活 edge，其他 edge 流保持隔离", () => {
+    const fixture = createFixture();
+    const peers = new FakePeerSessions();
+    const alicePeer = edgeSession("edge-peer-alice", fixture.alice);
+    const bobPeer = edgeSession("edge-peer-bob", fixture.bob);
+    const agentPeer = agentSession("agent-peer-shared", fixture.sharedAgent);
+    peers.connect(alicePeer);
+    peers.connect(bobPeer);
+    peers.connect(agentPeer);
+    const coordinator = new StreamOpenCoordinator({
+      peerSessions: peers,
+      authorizationRegistry: createRegistry(fixture),
+      signingCredentials: fixture.signingCredentials,
+      allowedDestination: DEFAULT_ALLOWED_DESTINATION
+    });
+    const aliceId = streamId(29);
+    const bobId = streamId(45);
+
+    peers.emit(alicePeer.peerId, edgeOpen(aliceId));
+    peers.emit(bobPeer.peerId, edgeOpen(bobId));
+    const aliceStream = coordinator.getActiveStreams().find((stream) => stream.edgeUserId === fixture.alice.edgeUserId)!;
+    const bobStream = coordinator.getActiveStreams().find((stream) => stream.edgeUserId === fixture.bob.edgeUserId)!;
+    peers.emit(agentPeer.peerId, streamFrame(FrameType.STREAM_OPENED, aliceStream.streamId, new Uint8Array()));
+    peers.emit(agentPeer.peerId, streamFrame(FrameType.STREAM_OPENED, bobStream.streamId, new Uint8Array()));
+
+    peers.disconnect(alicePeer.peerId);
+    expect(peers.framesFor(agentPeer.peerId, FrameType.STREAM_CLOSE).at(-1)?.streamId).toEqual(aliceStream.streamId);
+    expect(coordinator.getActiveStreams()).toHaveLength(1);
+    expect(coordinator.getActiveStreams()[0]?.edgeUserId).toBe(fixture.bob.edgeUserId);
+    expect(peers.framesFor(bobPeer.peerId, FrameType.STREAM_ERROR)).toHaveLength(0);
+
+    peers.disconnect(agentPeer.peerId);
+    expect(errorCode(peers.framesFor(bobPeer.peerId, FrameType.STREAM_ERROR).at(-1)!)).toBe(
+      TunnelErrorCode.PEER_DISCONNECTED
+    );
+    expect(coordinator.getActiveStreams()).toHaveLength(0);
+    coordinator.close();
+  });
+
+  it("在慢 WSS 消费者上延迟 credit 与 data，恢复后按单流顺序刷新且不放宽窗口", () => {
+    const fixture = createFixture();
+    const peers = new FakePeerSessions();
+    const alicePeer = edgeSession("edge-peer-alice", fixture.alice);
+    const agentPeer = agentSession("agent-peer-shared", fixture.sharedAgent);
+    peers.connect(alicePeer);
+    peers.connect(agentPeer);
+    const coordinator = new StreamOpenCoordinator({
+      peerSessions: peers,
+      authorizationRegistry: createRegistry(fixture),
+      signingCredentials: fixture.signingCredentials,
+      allowedDestination: DEFAULT_ALLOWED_DESTINATION
+    });
+    const edgeId = streamId(33);
+
+    peers.emit(alicePeer.peerId, edgeOpen(edgeId));
+    const ownership = coordinator.getActiveStreams()[0]!;
+    peers.emit(agentPeer.peerId, streamFrame(FrameType.STREAM_OPENED, ownership.streamId, new Uint8Array()));
+    peers.setSendBufferedBytes(agentPeer.peerId, DEFAULT_RESOURCE_LIMITS.maxBufferedBytesPerStream);
+    peers.emit(alicePeer.peerId, credit(edgeId, 64 * 1024));
+    expect(peers.framesFor(agentPeer.peerId, FrameType.STREAM_CREDIT)).toHaveLength(0);
+
+    peers.emit(agentPeer.peerId, credit(ownership.streamId, 64 * 1024));
+    peers.emit(alicePeer.peerId, streamFrame(FrameType.STREAM_DATA, edgeId, Uint8Array.of(7, 8, 9)));
+    expect(peers.framesFor(agentPeer.peerId, FrameType.STREAM_DATA)).toHaveLength(0);
+    expect(coordinator.getActiveStreams()[0]?.bufferedBytes).toBe(3);
+
+    peers.setSendBufferedBytes(agentPeer.peerId, 0);
+    peers.notifySendAvailable(agentPeer.peerId);
+    expect(peers.framesFor(agentPeer.peerId, FrameType.STREAM_CREDIT)).toHaveLength(1);
+    expect(peers.framesFor(agentPeer.peerId, FrameType.STREAM_DATA)[0]?.payload).toEqual(Uint8Array.of(7, 8, 9));
+    coordinator.close();
+  });
+
+  it("在慢 edge WSS 上延迟 agent credit，并在发送可用时仅向该 edge 恢复窗口", () => {
+    const fixture = createFixture();
+    const peers = new FakePeerSessions();
+    const alicePeer = edgeSession("edge-peer-alice", fixture.alice);
+    const agentPeer = agentSession("agent-peer-shared", fixture.sharedAgent);
+    peers.connect(alicePeer);
+    peers.connect(agentPeer);
+    const coordinator = new StreamOpenCoordinator({
+      peerSessions: peers,
+      authorizationRegistry: createRegistry(fixture),
+      signingCredentials: fixture.signingCredentials,
+      allowedDestination: DEFAULT_ALLOWED_DESTINATION
+    });
+    const edgeId = streamId(41);
+
+    peers.emit(alicePeer.peerId, edgeOpen(edgeId));
+    const ownership = coordinator.getActiveStreams()[0]!;
+    peers.emit(agentPeer.peerId, streamFrame(FrameType.STREAM_OPENED, ownership.streamId, new Uint8Array()));
+    peers.setSendBufferedBytes(alicePeer.peerId, DEFAULT_RESOURCE_LIMITS.maxBufferedBytesPerStream);
+    peers.emit(agentPeer.peerId, credit(ownership.streamId, 64 * 1024));
+    expect(peers.framesFor(alicePeer.peerId, FrameType.STREAM_CREDIT)).toHaveLength(0);
+
+    peers.setSendBufferedBytes(alicePeer.peerId, 0);
+    peers.notifySendAvailable(alicePeer.peerId);
+    expect(peers.framesFor(alicePeer.peerId, FrameType.STREAM_CREDIT)[0]?.streamId).toEqual(edgeId);
+    coordinator.close();
+  });
+
+  it("下游 WSS 发送失败时仅清理所属 stream，不保留可继续转发的映射", () => {
+    const fixture = createFixture();
+    const peers = new FakePeerSessions();
+    const alicePeer = edgeSession("edge-peer-alice", fixture.alice);
+    const agentPeer = agentSession("agent-peer-shared", fixture.sharedAgent);
+    peers.connect(alicePeer);
+    peers.connect(agentPeer);
+    const coordinator = new StreamOpenCoordinator({
+      peerSessions: peers,
+      authorizationRegistry: createRegistry(fixture),
+      signingCredentials: fixture.signingCredentials,
+      allowedDestination: DEFAULT_ALLOWED_DESTINATION
+    });
+    const edgeId = streamId(57);
+
+    peers.emit(alicePeer.peerId, edgeOpen(edgeId));
+    const ownership = coordinator.getActiveStreams()[0]!;
+    peers.emit(agentPeer.peerId, streamFrame(FrameType.STREAM_OPENED, ownership.streamId, new Uint8Array()));
+    peers.emit(agentPeer.peerId, credit(ownership.streamId, 64 * 1024));
+    peers.failNextSend(agentPeer.peerId);
+    peers.emit(alicePeer.peerId, streamFrame(FrameType.STREAM_DATA, edgeId, Uint8Array.of(1)));
+
+    expect(errorCode(peers.framesFor(alicePeer.peerId, FrameType.STREAM_ERROR).at(-1)!)).toBe(
+      TunnelErrorCode.PEER_DISCONNECTED
+    );
+    expect(coordinator.getActiveStreams()).toHaveLength(0);
+    coordinator.close();
+  });
+
+  it("按用户授权隔离慢流缓冲，单一用户超额仅关闭自身流，聚合上限不会泄漏映射", () => {
+    const fixture = createFixture();
+    const peers = new FakePeerSessions();
+    const alicePeer = edgeSession("edge-peer-alice", fixture.alice);
+    const bobPeer = edgeSession("edge-peer-bob", fixture.bob);
+    const agentPeer = agentSession("agent-peer-shared", fixture.sharedAgent);
+    peers.connect(alicePeer);
+    peers.connect(bobPeer);
+    peers.connect(agentPeer);
+    const registry = new AuthorizationRegistry({
+      peerIdentities: fixture.peerIdentities,
+      document: {
+        auditVersion: 1,
+        authorizations: [
+          { ...registration(fixture.alice, fixture.sharedAgent), quota: { maxConcurrentStreams: 2, maxBufferedBytes: 4 } },
+          { ...registration(fixture.bob, fixture.sharedAgent), quota: { maxConcurrentStreams: 2, maxBufferedBytes: 4 } }
+        ]
+      }
+    });
+    const coordinator = new StreamOpenCoordinator({
+      peerSessions: peers,
+      authorizationRegistry: registry,
+      signingCredentials: fixture.signingCredentials,
+      allowedDestination: DEFAULT_ALLOWED_DESTINATION,
+      resourceLimits: {
+        ...DEFAULT_RESOURCE_LIMITS,
+        maxConcurrentStreams: 2,
+        maxBufferedBytesPerStream: 8,
+        maxAggregateBufferedBytes: 8
+      }
+    });
+    const aliceId = streamId(65);
+    const bobId = streamId(97);
+
+    peers.emit(alicePeer.peerId, edgeOpen(aliceId));
+    peers.emit(bobPeer.peerId, edgeOpen(bobId));
+    const aliceStream = coordinator.getActiveStreams().find((stream) => stream.edgeUserId === fixture.alice.edgeUserId)!;
+    const bobStream = coordinator.getActiveStreams().find((stream) => stream.edgeUserId === fixture.bob.edgeUserId)!;
+    peers.emit(agentPeer.peerId, streamFrame(FrameType.STREAM_OPENED, aliceStream.streamId, new Uint8Array()));
+    peers.emit(agentPeer.peerId, streamFrame(FrameType.STREAM_OPENED, bobStream.streamId, new Uint8Array()));
+    peers.emit(agentPeer.peerId, credit(aliceStream.streamId, 4));
+    peers.emit(agentPeer.peerId, credit(bobStream.streamId, 4));
+    peers.emit(alicePeer.peerId, streamFrame(FrameType.STREAM_DATA, aliceId, new Uint8Array(4)));
+    peers.emit(alicePeer.peerId, streamFrame(FrameType.STREAM_DATA, aliceId, Uint8Array.of(1)));
+    peers.emit(bobPeer.peerId, streamFrame(FrameType.STREAM_DATA, bobId, new Uint8Array(4)));
+
+    expect(errorCode(peers.framesFor(alicePeer.peerId, FrameType.STREAM_ERROR).at(-1)!)).toBe(
+      TunnelErrorCode.FLOW_CONTROL_VIOLATION
+    );
+    expect(peers.framesFor(agentPeer.peerId, FrameType.STREAM_DATA).at(-1)?.streamId).toEqual(bobStream.streamId);
+    expect(coordinator.getActiveStreams()).toHaveLength(1);
+    expect(coordinator.getActiveStreams()[0]).toMatchObject({ edgeUserId: fixture.bob.edgeUserId, bufferedBytes: 4 });
+
+    peers.emit(bobPeer.peerId, streamFrame(FrameType.STREAM_CLOSE, bobId, encodeStreamClosePayload({ code: StreamCloseCode.NORMAL })));
+    expect(coordinator.getActiveStreams()).toHaveLength(0);
+    coordinator.close();
+  });
+
+  it("在共享 agent 的聚合缓冲达到上限时只关闭触发超限的 stream，并保留另一用户的有界流", () => {
+    const fixture = createFixture();
+    const peers = new FakePeerSessions();
+    const alicePeer = edgeSession("edge-peer-alice", fixture.alice);
+    const bobPeer = edgeSession("edge-peer-bob", fixture.bob);
+    const agentPeer = agentSession("agent-peer-shared", fixture.sharedAgent);
+    peers.connect(alicePeer);
+    peers.connect(bobPeer);
+    peers.connect(agentPeer);
+    const coordinator = new StreamOpenCoordinator({
+      peerSessions: peers,
+      authorizationRegistry: createRegistry(fixture),
+      signingCredentials: fixture.signingCredentials,
+      allowedDestination: DEFAULT_ALLOWED_DESTINATION,
+      resourceLimits: {
+        ...DEFAULT_RESOURCE_LIMITS,
+        maxConcurrentStreams: 2,
+        maxBufferedBytesPerStream: 8,
+        maxAggregateBufferedBytes: 8
+      }
+    });
+    const aliceId = streamId(129);
+    const bobId = streamId(161);
+
+    peers.emit(alicePeer.peerId, edgeOpen(aliceId));
+    peers.emit(bobPeer.peerId, edgeOpen(bobId));
+    const aliceStream = coordinator.getActiveStreams().find((stream) => stream.edgeUserId === fixture.alice.edgeUserId)!;
+    const bobStream = coordinator.getActiveStreams().find((stream) => stream.edgeUserId === fixture.bob.edgeUserId)!;
+    peers.emit(agentPeer.peerId, streamFrame(FrameType.STREAM_OPENED, aliceStream.streamId, new Uint8Array()));
+    peers.emit(agentPeer.peerId, streamFrame(FrameType.STREAM_OPENED, bobStream.streamId, new Uint8Array()));
+    peers.emit(agentPeer.peerId, credit(aliceStream.streamId, 4));
+    peers.emit(agentPeer.peerId, credit(bobStream.streamId, 4));
+    peers.emit(alicePeer.peerId, streamFrame(FrameType.STREAM_DATA, aliceId, new Uint8Array(4)));
+    peers.emit(bobPeer.peerId, streamFrame(FrameType.STREAM_DATA, bobId, new Uint8Array(4)));
+    expect(coordinator.getActiveStreams().reduce((total, stream) => total + stream.bufferedBytes, 0)).toBe(8);
+
+    peers.emit(alicePeer.peerId, credit(aliceId, 4));
+    peers.emit(agentPeer.peerId, streamFrame(FrameType.STREAM_DATA, aliceStream.streamId, Uint8Array.of(1)));
+    expect(errorCode(peers.framesFor(alicePeer.peerId, FrameType.STREAM_ERROR).at(-1)!)).toBe(
+      TunnelErrorCode.FLOW_CONTROL_VIOLATION
+    );
+    expect(coordinator.getActiveStreams()).toHaveLength(1);
+    expect(coordinator.getActiveStreams()[0]).toMatchObject({ edgeUserId: fixture.bob.edgeUserId, bufferedBytes: 4 });
+    coordinator.close();
+  });
+
+  it("空闲超时仅向关联 edge 和 agent 发送 close，并清理该 stream", () => {
+    const fixture = createFixture();
+    const peers = new FakePeerSessions();
+    const alicePeer = edgeSession("edge-peer-alice", fixture.alice);
+    const agentPeer = agentSession("agent-peer-shared", fixture.sharedAgent);
+    peers.connect(alicePeer);
+    peers.connect(agentPeer);
+    let nowMs = 1_000;
+    const coordinator = new StreamOpenCoordinator({
+      peerSessions: peers,
+      authorizationRegistry: createRegistry(fixture),
+      signingCredentials: fixture.signingCredentials,
+      allowedDestination: DEFAULT_ALLOWED_DESTINATION,
+      resourceLimits: { ...DEFAULT_RESOURCE_LIMITS, maxIdleMs: 10 },
+      capabilityTtlMs: 100,
+      now: () => nowMs
+    });
+    const edgeId = streamId(193);
+
+    peers.emit(alicePeer.peerId, edgeOpen(edgeId));
+    const ownership = coordinator.getActiveStreams()[0]!;
+    peers.emit(agentPeer.peerId, streamFrame(FrameType.STREAM_OPENED, ownership.streamId, new Uint8Array()));
+    nowMs = 1_010;
+    coordinator.expireOpenStreams();
+
+    expect(peers.framesFor(alicePeer.peerId, FrameType.STREAM_CLOSE).at(-1)?.streamId).toEqual(edgeId);
+    expect(peers.framesFor(agentPeer.peerId, FrameType.STREAM_CLOSE).at(-1)?.streamId).toEqual(ownership.streamId);
+    expect(coordinator.getActiveStreams()).toHaveLength(0);
+    coordinator.close();
+  });
+
+  it("agent error 释放未确认字节和用户配额，后续同一用户 stream 可重新保留缓冲", () => {
+    const fixture = createFixture();
+    const peers = new FakePeerSessions();
+    const alicePeer = edgeSession("edge-peer-alice", fixture.alice);
+    const agentPeer = agentSession("agent-peer-shared", fixture.sharedAgent);
+    peers.connect(alicePeer);
+    peers.connect(agentPeer);
+    const registry = new AuthorizationRegistry({
+      peerIdentities: fixture.peerIdentities,
+      document: {
+        auditVersion: 1,
+        authorizations: [
+          { ...registration(fixture.alice, fixture.sharedAgent), quota: { maxConcurrentStreams: 2, maxBufferedBytes: 4 } }
+        ]
+      }
+    });
+    const coordinator = new StreamOpenCoordinator({
+      peerSessions: peers,
+      authorizationRegistry: registry,
+      signingCredentials: fixture.signingCredentials,
+      allowedDestination: DEFAULT_ALLOWED_DESTINATION,
+      resourceLimits: {
+        ...DEFAULT_RESOURCE_LIMITS,
+        maxConcurrentStreams: 2,
+        maxBufferedBytesPerStream: 8,
+        maxAggregateBufferedBytes: 8
+      }
+    });
+    const firstEdgeId = streamId(209);
+    const secondEdgeId = streamId(225);
+
+    peers.emit(alicePeer.peerId, edgeOpen(firstEdgeId));
+    const first = coordinator.getActiveStreams()[0]!;
+    peers.emit(agentPeer.peerId, streamFrame(FrameType.STREAM_OPENED, first.streamId, new Uint8Array()));
+    peers.emit(agentPeer.peerId, credit(first.streamId, 4));
+    peers.emit(alicePeer.peerId, streamFrame(FrameType.STREAM_DATA, firstEdgeId, new Uint8Array(4)));
+    expect(coordinator.getActiveStreams()[0]?.bufferedBytes).toBe(4);
+    peers.emit(
+      agentPeer.peerId,
+      streamFrame(
+        FrameType.STREAM_ERROR,
+        first.streamId,
+        encodeStreamErrorPayload({ code: TunnelErrorCode.CONNECT_FAILED })
+      )
+    );
+    expect(coordinator.getActiveStreams()).toHaveLength(0);
+
+    peers.emit(alicePeer.peerId, edgeOpen(secondEdgeId));
+    const second = coordinator.getActiveStreams()[0]!;
+    peers.emit(agentPeer.peerId, streamFrame(FrameType.STREAM_OPENED, second.streamId, new Uint8Array()));
+    peers.emit(agentPeer.peerId, credit(second.streamId, 4));
+    peers.emit(alicePeer.peerId, streamFrame(FrameType.STREAM_DATA, secondEdgeId, new Uint8Array(4)));
+    expect(coordinator.getActiveStreams()[0]).toMatchObject({ bufferedBytes: 4, edgeStreamId: secondEdgeId });
+    coordinator.close();
   });
 });

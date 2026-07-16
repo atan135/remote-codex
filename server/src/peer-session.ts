@@ -54,6 +54,9 @@ export type PeerSessionStreamFrameListener = (
 /** peer 会话失效通知，用于关闭只归属该会话的 stream。 */
 export type PeerSessionRemovalListener = (session: AuthenticatedPeerSession) => void;
 
+/** 已发送 WebSocket 帧完成排队后触发，用于让中继重试受背压延迟的 stream 帧。 */
+export type PeerSessionSendAvailabilityListener = (peerId: string) => void;
+
 export interface PeerSessionManagerOptions {
   readonly peerIdentities?: readonly ServerPeerIdentityRegistration[];
   readonly heartbeatTimeoutMs: number;
@@ -173,6 +176,7 @@ export class PeerSessionManager {
   private readonly agentSessionsByAgentId = new Map<string, SessionRecord>();
   private readonly streamFrameListeners = new Set<PeerSessionStreamFrameListener>();
   private readonly sessionRemovalListeners = new Set<PeerSessionRemovalListener>();
+  private readonly sendAvailabilityListeners = new Set<PeerSessionSendAvailabilityListener>();
   private readonly challengeReplayProtector = new NonceReplayProtector();
   private readonly registrationNonceReplayProtector = new NonceReplayProtector();
   private readonly now: () => number;
@@ -259,6 +263,27 @@ export class PeerSessionManager {
     return (): void => {
       this.sessionRemovalListeners.delete(listener);
     };
+  }
+
+  /**
+   * 注册本地 WSS 发送队列可能已腾出空间的通知。该通知不携带帧内容，且允许
+   * 调用方重复取消订阅。
+   */
+  public subscribeSendAvailability(listener: PeerSessionSendAvailabilityListener): () => void {
+    this.sendAvailabilityListeners.add(listener);
+    return (): void => {
+      this.sendAvailabilityListeners.delete(listener);
+    };
+  }
+
+  /** 仅暴露本地 WebSocket 排队字节数，供 stream 层实施背压；不会暴露 payload。 */
+  public getSendBufferedBytes(peerId: string): number | undefined {
+    const session = this.sessionsByPeerId.get(peerId);
+    if (session === undefined || !Number.isSafeInteger(session.socket.bufferedAmount) || session.socket.bufferedAmount < 0) {
+      return undefined;
+    }
+
+    return session.socket.bufferedAmount;
   }
 
   /** 只向仍在线的指定已认证 peer 发送经过 shared 校验的二进制帧。 */
@@ -579,11 +604,36 @@ export class PeerSessionManager {
     }
 
     try {
-      socket.send(Buffer.from(encodeFrame(frame)), { binary: true });
+      socket.send(Buffer.from(encodeFrame(frame)), { binary: true }, (error?: Error | null) => {
+        // `ws` 在成功完成时会传入 undefined 或 null，只有实际 Error 才表示发送失败。
+        if (error != null) {
+          // 认证拒绝或受控关闭可能使先前 challenge/heartbeat 的异步 send
+          // 回调报错；这时原 close reason 已经确定，不能用通用断线原因覆盖它。
+          if (this.pendingBySocket.has(socket) || this.sessionsBySocket.has(socket)) {
+            this.revokeSocket(socket, CLOSE_CODE_POLICY, "PEER_DISCONNECTED");
+          }
+          return;
+        }
+
+        const session = this.sessionsBySocket.get(socket);
+        if (session !== undefined) {
+          queueMicrotask(() => this.notifySendAvailability(session.peerId));
+        }
+      });
       return true;
     } catch {
       this.revokeSocket(socket, CLOSE_CODE_POLICY, "PEER_DISCONNECTED");
       return false;
+    }
+  }
+
+  private notifySendAvailability(peerId: string): void {
+    for (const listener of this.sendAvailabilityListeners) {
+      try {
+        listener(peerId);
+      } catch {
+        // stream 层调度失败不能影响已认证 peer 会话。
+      }
     }
   }
 }

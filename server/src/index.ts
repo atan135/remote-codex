@@ -24,6 +24,7 @@ export {
   type PeerAuthenticationMetadata,
   type PeerSessionManagerOptions,
   type PeerSessionRemovalListener,
+  type PeerSessionSendAvailabilityListener,
   type PeerSessionStreamFrameListener,
   type ServerPeerIdentityRegistration
 } from "./peer-session.js";
