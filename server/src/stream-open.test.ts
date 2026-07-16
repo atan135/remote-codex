@@ -1264,4 +1264,129 @@ describe("server stream.open 授权与 capability 签发", () => {
     expect(auditLogs.every((event) => !event.includes("payload") && !event.includes("capability"))).toBe(true);
     coordinator.close();
   });
+
+  it("在共享 agent 上隔离用户、credit、关闭、撤销和审计，且拒绝所有越权中继", () => {
+    const fixture = createFixture();
+    const peers = new FakePeerSessions();
+    const alicePeer = edgeSession("edge-peer-alice", fixture.alice);
+    const bobPeer = edgeSession("edge-peer-bob", fixture.bob);
+    const unauthorizedPeer = edgeSession("edge-peer-unauthorized", createEdgeIdentity("edge-user-unauthorized", "edge-device-unauthorized"));
+    const sharedAgentPeer = agentSession("agent-peer-shared", fixture.sharedAgent);
+    const wrongAgentPeer = agentSession("agent-peer-other", fixture.otherAgent);
+    const auditLogs: string[] = [];
+    const requestPayload = Buffer.from("Authorization: Bearer test-token; Cookie: test-cookie");
+    const responsePayload = Buffer.from("upstream-response-without-secrets");
+    const registry = createRegistry(fixture, 1);
+    peers.connect(alicePeer);
+    peers.connect(bobPeer);
+    peers.connect(unauthorizedPeer);
+    peers.connect(sharedAgentPeer);
+    peers.connect(wrongAgentPeer);
+    const coordinator = new StreamOpenCoordinator({
+      peerSessions: peers,
+      authorizationRegistry: registry,
+      signingCredentials: fixture.signingCredentials,
+      allowedDestination: DEFAULT_ALLOWED_DESTINATION,
+      auditLogger: (event) => auditLogs.push(event),
+      now: () => 1_000
+    });
+    const aliceId = streamId(1);
+    const bobId = streamId(33);
+
+    peers.emit(alicePeer.peerId, edgeOpen(aliceId));
+    peers.emit(bobPeer.peerId, edgeOpen(bobId));
+    const aliceStream = coordinator.getActiveStreams().find((stream) => stream.edgeUserId === fixture.alice.edgeUserId)!;
+    const bobStream = coordinator.getActiveStreams().find((stream) => stream.edgeUserId === fixture.bob.edgeUserId)!;
+    const agentOpens = peers.framesFor(sharedAgentPeer.peerId, FrameType.STREAM_OPEN);
+    expect(agentOpens).toHaveLength(2);
+    expect(peers.framesFor(wrongAgentPeer.peerId, FrameType.STREAM_OPEN)).toHaveLength(0);
+
+    const aliceCapability = openPayload(agentOpens.find((frame) => frame.streamId.every((value, index) => value === aliceStream.streamId[index]))!);
+    expect(
+      verifyCapability({
+        capability: aliceCapability.capability,
+        serverIdentity: fixture.signingCredentials.identity,
+        expectedBinding: {
+          edgeUserId: fixture.bob.edgeUserId,
+          edgeDeviceId: fixture.bob.edgeDeviceId,
+          agentId: fixture.sharedAgent.agentId,
+          streamId: aliceStream.streamId,
+          destination: DEFAULT_ALLOWED_DESTINATION
+        },
+        allowedDestination: DEFAULT_ALLOWED_DESTINATION,
+        replayProtector: new CapabilityReplayProtector(),
+        nowMs: 1_000
+      }).ok
+    ).toBe(false);
+
+    peers.emit(sharedAgentPeer.peerId, streamFrame(FrameType.STREAM_OPENED, aliceStream.streamId, new Uint8Array()));
+    peers.emit(sharedAgentPeer.peerId, streamFrame(FrameType.STREAM_OPENED, bobStream.streamId, new Uint8Array()));
+    peers.emit(sharedAgentPeer.peerId, credit(aliceStream.streamId, 64));
+    peers.emit(sharedAgentPeer.peerId, credit(bobStream.streamId, 64));
+    peers.emit(alicePeer.peerId, credit(aliceId, 64));
+    peers.emit(bobPeer.peerId, credit(bobId, 64));
+
+    peers.emit(alicePeer.peerId, streamFrame(FrameType.STREAM_DATA, aliceId, requestPayload));
+    peers.emit(sharedAgentPeer.peerId, streamFrame(FrameType.STREAM_DATA, aliceStream.streamId, responsePayload));
+    const forwardedRequest = peers.framesFor(sharedAgentPeer.peerId, FrameType.STREAM_DATA).at(-1)!;
+    const forwardedResponse = peers.framesFor(alicePeer.peerId, FrameType.STREAM_DATA).at(-1)!;
+    expect(forwardedRequest.streamId).toEqual(aliceStream.streamId);
+    expect(forwardedRequest.payload).toEqual(Uint8Array.from(requestPayload));
+    expect(forwardedResponse.streamId).toEqual(aliceId);
+    expect(forwardedResponse.payload).toEqual(Uint8Array.from(responsePayload));
+    expect(peers.framesFor(bobPeer.peerId, FrameType.STREAM_DATA)).toHaveLength(0);
+
+    // Bob cannot target Alice's edge-local ID; each attempt only returns an error to Bob.
+    peers.emit(bobPeer.peerId, credit(aliceId, 1));
+    peers.emit(bobPeer.peerId, streamFrame(FrameType.STREAM_DATA, aliceId, Uint8Array.of(9)));
+    peers.emit(
+      bobPeer.peerId,
+      streamFrame(FrameType.STREAM_CLOSE, aliceId, encodeStreamClosePayload({ code: StreamCloseCode.NORMAL }))
+    );
+    expect(peers.framesFor(bobPeer.peerId, FrameType.STREAM_ERROR).slice(-3).map(errorCode)).toEqual([
+      TunnelErrorCode.PROTOCOL_VIOLATION,
+      TunnelErrorCode.PROTOCOL_VIOLATION,
+      TunnelErrorCode.PROTOCOL_VIOLATION
+    ]);
+    expect(coordinator.getActiveStreams().map((stream) => stream.edgeUserId).sort()).toEqual([
+      fixture.alice.edgeUserId,
+      fixture.bob.edgeUserId
+    ]);
+
+    peers.emit(wrongAgentPeer.peerId, streamFrame(FrameType.STREAM_DATA, aliceStream.streamId, Uint8Array.of(7)));
+    expect(errorCode(peers.framesFor(wrongAgentPeer.peerId, FrameType.STREAM_ERROR).at(-1)!)).toBe(
+      TunnelErrorCode.PROTOCOL_VIOLATION
+    );
+    expect(peers.framesFor(alicePeer.peerId, FrameType.STREAM_DATA)).toHaveLength(1);
+
+    peers.emit(unauthorizedPeer.peerId, edgeOpen(streamId(65)));
+    expect(errorCode(peers.framesFor(unauthorizedPeer.peerId, FrameType.STREAM_REJECTED)[0]!)).toBe(
+      TunnelErrorCode.AUTH_UNAUTHORIZED
+    );
+    peers.emit(alicePeer.peerId, edgeOpen(streamId(81)));
+    expect(errorCode(peers.framesFor(alicePeer.peerId, FrameType.STREAM_REJECTED).at(-1)!)).toBe(
+      TunnelErrorCode.STREAM_LIMIT_EXCEEDED
+    );
+    expect(peers.framesFor(sharedAgentPeer.peerId, FrameType.STREAM_OPEN)).toHaveLength(2);
+
+    registry.revokeByEdgeDevice(fixture.bob.edgeDeviceId, 1_001);
+    expect(errorCode(peers.framesFor(bobPeer.peerId, FrameType.STREAM_ERROR).at(-1)!)).toBe(TunnelErrorCode.AUTH_UNAUTHORIZED);
+    expect(peers.framesFor(sharedAgentPeer.peerId, FrameType.STREAM_CLOSE).at(-1)?.streamId).toEqual(bobStream.streamId);
+    expect(coordinator.getActiveStreams().map((stream) => stream.edgeUserId)).toEqual([fixture.alice.edgeUserId]);
+
+    peers.disconnect(sharedAgentPeer.peerId);
+    expect(errorCode(peers.framesFor(alicePeer.peerId, FrameType.STREAM_ERROR).at(-1)!)).toBe(
+      TunnelErrorCode.PEER_DISCONNECTED
+    );
+    peers.emit(alicePeer.peerId, edgeOpen(streamId(97)));
+    expect(errorCode(peers.framesFor(alicePeer.peerId, FrameType.STREAM_REJECTED).at(-1)!)).toBe(
+      TunnelErrorCode.PEER_DISCONNECTED
+    );
+    expect(coordinator.getActiveStreams()).toHaveLength(0);
+
+    expect(auditLogs.join("\n")).not.toContain("test-token");
+    expect(auditLogs.join("\n")).not.toContain("test-cookie");
+    expect(auditLogs.every((event) => !event.includes("capability") && !event.includes("authorization"))).toBe(true);
+    coordinator.close();
+  });
 });
