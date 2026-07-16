@@ -344,6 +344,9 @@ describe("egress agent final authorization and restricted TCP dialing", () => {
       readonly expected: string;
     }> = [
       { makeFrame: (streamId, capability) => openFrame(streamId, capability, "127.0.0.1"), expected: TunnelErrorCode.DESTINATION_REJECTED },
+      { makeFrame: (streamId, capability) => openFrame(streamId, capability, "[::1]"), expected: TunnelErrorCode.DESTINATION_REJECTED },
+      // 最终边界按精确 hostname，而非 DNS 结果授权；即使部署时二者解析到同一 IP 也不可拨号。
+      { makeFrame: (streamId, capability) => openFrame(streamId, capability, "same-ip-alias.integration.test"), expected: TunnelErrorCode.DESTINATION_REJECTED },
       { makeFrame: (streamId, capability) => openFrame(streamId, capability, `other.${HOSTNAME}`), expected: TunnelErrorCode.DESTINATION_REJECTED },
       { makeFrame: malformedPortFrame, expected: TunnelErrorCode.CAPABILITY_INVALID },
       {
@@ -812,5 +815,34 @@ describe("egress agent final authorization and restricted TCP dialing", () => {
     sendingSocket.emitData(Uint8Array.of(6));
     expect(sendingSocket.destroyCalls).toBe(1);
     expect(sendingDialer.activeStreamCount).toBe(0);
+  });
+
+  it("模拟进程退出时幂等销毁所有 pending 与已连接 TCP 资源", () => {
+    const config = createConfig();
+    const { identity, credentials } = createServerFixture();
+    const connector = new FakeConnector();
+    const dialer = new EgressAgentDialer({ config, capabilityServerIdentity: identity, connector, now: () => NOW_MS + 1 });
+    const { session, sent } = createSession();
+    const connectedId = createStreamId();
+    const pendingId = createStreamId();
+
+    dialer.handleFrame(session, openFrame(connectedId, issueOpenCapability(credentials, connectedId)));
+    dialer.handleFrame(session, openFrame(pendingId, issueOpenCapability(credentials, pendingId)));
+    const connectedSocket = connector.sockets[0];
+    const pendingSocket = connector.sockets[1];
+    if (connectedSocket === undefined || pendingSocket === undefined) {
+      throw new Error("expected both restricted TCP sockets");
+    }
+    connectedSocket.emit("connect");
+
+    dialer.closeAll();
+    dialer.closeAll();
+    connectedSocket.emitData(Uint8Array.of(1));
+    pendingSocket.emit("connect");
+
+    expect(connectedSocket.destroyCalls).toBe(1);
+    expect(pendingSocket.destroyCalls).toBe(1);
+    expect(dialer.activeStreamCount).toBe(0);
+    expect(sent.filter((frame) => frame.type === FrameType.STREAM_DATA)).toHaveLength(0);
   });
 });

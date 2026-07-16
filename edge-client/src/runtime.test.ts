@@ -1,4 +1,6 @@
 import { generateKeyPairSync } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import {
   CapabilityReplayProtector,
@@ -1133,5 +1135,51 @@ describe("edge persistent WSS session", () => {
     expect(sockets.sockets).toHaveLength(1);
     expect(runtime.getStatus()).toEqual({ state: "stopped", reconnectAttempts: 1 });
     expect(() => runtime.start()).toThrow("EDGE_RUNTIME_STOPPED");
+  });
+
+  it("edge 认证握手不会记录身份、challenge 或认证材料", () => {
+    const runtimeSource = readFileSync(fileURLToPath(new URL("./runtime.ts", import.meta.url)), "utf8");
+    const proxySource = readFileSync(fileURLToPath(new URL("./connect-proxy.ts", import.meta.url)), "utf8");
+    expect(`${runtimeSource}\n${proxySource}`).not.toMatch(
+      /\b(?:console\.(?:log|debug|info|warn|error)|logger\.|process\.(?:stdout|stderr)\.write\s*\()/u
+    );
+
+    const sockets = new FakeSocketFactory();
+    const runtime = new EdgeClientRuntime({
+      config: createConfig(),
+      ...createIdentity(),
+      socketFactory: sockets,
+      now: () => 1_000,
+      randomBytes: (size) => Uint8Array.from({ length: size }, (_, index) => index + 1)
+    });
+    const consoleSpies = [
+      vi.spyOn(console, "log"),
+      vi.spyOn(console, "debug"),
+      vi.spyOn(console, "info"),
+      vi.spyOn(console, "warn"),
+      vi.spyOn(console, "error")
+    ];
+    const outputSpies = [vi.spyOn(process.stdout, "write"), vi.spyOn(process.stderr, "write")];
+
+    try {
+      runtime.start();
+      const socket = sockets.sockets[0];
+      if (socket === undefined) {
+        throw new Error("expected WSS socket");
+      }
+
+      authenticate(socket, 1_000);
+      expect(runtime.getStatus()).toEqual({ state: "online", reconnectAttempts: 0 });
+      expect(consoleSpies.every((spy) => spy.mock.calls.length === 0)).toBe(true);
+      expect(outputSpies.every((spy) => spy.mock.calls.length === 0)).toBe(true);
+    } finally {
+      for (const spy of consoleSpies) {
+        spy.mockRestore();
+      }
+      for (const spy of outputSpies) {
+        spy.mockRestore();
+      }
+      runtime.stop();
+    }
   });
 });

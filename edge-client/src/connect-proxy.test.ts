@@ -1,7 +1,9 @@
+import { readFileSync } from "node:fs";
 import { connect, type Socket } from "node:net";
+import { fileURLToPath } from "node:url";
 
 import { DEFAULT_ALLOWED_DESTINATION, type ValidatedDestination } from "@remote-codex/shared";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   LoopbackConnectProxy,
@@ -144,6 +146,27 @@ async function request(proxy: LoopbackConnectProxy, serializedRequest: string): 
   return capture;
 }
 
+async function expectConnectionFailure(host: string, port: number): Promise<void> {
+  const socket = connect({ host, port });
+  const failure = await new Promise<Error>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      reject(new Error(`unexpected connection to ${host}`));
+    }, 1_000);
+    socket.once("connect", () => {
+      clearTimeout(timeout);
+      socket.destroy();
+      reject(new Error(`unexpected connection to ${host}`));
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timeout);
+      resolve(error);
+    });
+  });
+
+  expect(failure).toBeInstanceOf(Error);
+}
+
 const CONNECT_REQUEST = `CONNECT ${DEFAULT_ALLOWED_DESTINATION.hostname}:443 HTTP/1.1\r\nHost: ${DEFAULT_ALLOWED_DESTINATION.hostname}:443\r\n\r\n`;
 
 describe("LoopbackConnectProxy", () => {
@@ -248,6 +271,43 @@ describe("LoopbackConnectProxy", () => {
     const failure = await new Promise<Error>((resolve) => socket.once("error", resolve));
     expect((failure as NodeJS.ErrnoException).code).toBe("ECONNREFUSED");
     expect(gateway.streams).toHaveLength(0);
+  });
+
+  it("固定 IPv4 loopback 监听，且 CONNECT 机密不会进入运行日志", async () => {
+    const gateway = new FakeGateway();
+    const proxy = createProxy(gateway);
+    const consoleSpies = [
+      vi.spyOn(console, "log"),
+      vi.spyOn(console, "debug"),
+      vi.spyOn(console, "info"),
+      vi.spyOn(console, "warn"),
+      vi.spyOn(console, "error")
+    ];
+
+    try {
+      const address = await proxy.start();
+      expect(address.host).toBe("127.0.0.1");
+      await expectConnectionFailure("127.0.0.2", address.port);
+      await expectConnectionFailure("::1", address.port);
+
+      const capture = await request(
+        proxy,
+        `CONNECT ${DEFAULT_ALLOWED_DESTINATION.hostname}:443 HTTP/1.1\r\nProxy-Authorization: Basic never-log-this\r\n\r\n`
+      );
+      await waitFor(() => capture.ended);
+      expect(capturedText(capture)).toContain("HTTP/1.1 403 Forbidden");
+      expect(gateway.streams).toHaveLength(0);
+      expect(consoleSpies.every((spy) => spy.mock.calls.length === 0)).toBe(true);
+
+      const source = readFileSync(fileURLToPath(new URL("./connect-proxy.ts", import.meta.url)), "utf8");
+      expect(source).toContain('host: LOOPBACK_LISTEN_HOST');
+      expect(source).not.toMatch(/\b(?:console\.(?:log|debug|info|warn|error)|logger\.)/u);
+      expect(source).not.toMatch(/0\.0\.0\.0|::1/u);
+    } finally {
+      for (const spy of consoleSpies) {
+        spy.mockRestore();
+      }
+    }
   });
 
   it("拒绝普通 HTTP 方法，且不创建 stream", async () => {
@@ -390,5 +450,21 @@ describe("LoopbackConnectProxy", () => {
     await waitFor(() => capture.ended);
     expect(capturedText(capture)).toContain("HTTP/1.1 504 Gateway Timeout");
     expect(firstStream(gateway).closeCalls).toBe(1);
+  });
+
+  it("停止会撤销 pending CONNECT、关闭监听器，且重复停止不会保留 socket", async () => {
+    const gateway = new FakeGateway();
+    const proxy = createProxy(gateway);
+    const address = await proxy.start();
+    const capture = await request(proxy, CONNECT_REQUEST);
+
+    await waitFor(() => gateway.streams.length === 1);
+    await proxy.stop();
+    await waitFor(() => capture.socket.destroyed);
+
+    expect(firstStream(gateway).closeCalls).toBe(1);
+    expect(() => proxy.address()).toThrow("loopback proxy is not listening");
+    await proxy.stop();
+    await expectConnectionFailure(address.host, address.port);
   });
 });

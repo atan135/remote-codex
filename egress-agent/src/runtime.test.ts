@@ -1,4 +1,6 @@
 import { generateKeyPairSync } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import {
   connectionFrame,
@@ -800,5 +802,85 @@ describe("egress agent persistent WSS session", () => {
 
     expect(() => runtime.start()).toThrow("CONFIG_TLS_VERIFICATION_DISABLED");
     expect(sockets.sockets).toHaveLength(0);
+  });
+
+  it("agent 不创建 TCP 入站监听器，也不会记录 capability 或认证材料", () => {
+    const runtimeSource = readFileSync(fileURLToPath(new URL("./runtime.ts", import.meta.url)), "utf8");
+    const dialerSource = readFileSync(fileURLToPath(new URL("./dialer.ts", import.meta.url)), "utf8");
+    expect(`${runtimeSource}\n${dialerSource}`).not.toMatch(
+      /\b(?:createServer\s*\(|\.listen\s*\(|console\.(?:log|debug|info|warn|error)|logger\.|process\.(?:stdout|stderr)\.write\s*\()/u
+    );
+
+    const sockets = new FakeSocketFactory();
+    const connector = new FakeTcpConnector();
+    const { identity: capabilityServerIdentity, credentials } = createServerCapabilityCredentials();
+    const runtime = new EgressAgentRuntime({
+      config: createConfig(),
+      ...createIdentity(),
+      origin: "https://agent.example.test",
+      capabilityServerIdentity,
+      connector,
+      socketFactory: sockets,
+      now: () => 1_000,
+      randomBytes: (size) => Uint8Array.from({ length: size }, (_, index) => index + 1)
+    });
+    const consoleSpies = [
+      vi.spyOn(console, "log"),
+      vi.spyOn(console, "debug"),
+      vi.spyOn(console, "info"),
+      vi.spyOn(console, "warn"),
+      vi.spyOn(console, "error")
+    ];
+    const outputSpies = [vi.spyOn(process.stdout, "write"), vi.spyOn(process.stderr, "write")];
+
+    try {
+      const streamId = createStreamId();
+      const capability = issueCapability({
+        credentials,
+        binding: {
+          edgeUserId: "edge-user-never-log",
+          edgeDeviceId: "edge-device-never-log",
+          agentId: createConfig().agentId,
+          streamId,
+          destination: createConfig().allowedDestination
+        },
+        allowedDestination: createConfig().allowedDestination,
+        nowMs: 1_000,
+        ttlMs: 100,
+        randomBytes: (size) => Uint8Array.from({ length: size }, (_, index) => index + 10)
+      });
+
+      runtime.start();
+      const socket = sockets.sockets[0];
+      if (socket === undefined) {
+        throw new Error("expected WSS socket");
+      }
+      authenticate(socket, 1_000);
+      socket.emitMessage(
+        encodeFrame(
+          streamFrame(
+            FrameType.STREAM_OPEN,
+            streamId,
+            encodeStreamOpenPayload({
+              hostname: createConfig().allowedDestination.hostname,
+              port: 443,
+              capability
+            })
+          )
+        )
+      );
+
+      expect(connector.calls).toEqual([{ hostname: createConfig().allowedDestination.hostname, port: 443 }]);
+      expect(consoleSpies.every((spy) => spy.mock.calls.length === 0)).toBe(true);
+      expect(outputSpies.every((spy) => spy.mock.calls.length === 0)).toBe(true);
+    } finally {
+      for (const spy of consoleSpies) {
+        spy.mockRestore();
+      }
+      for (const spy of outputSpies) {
+        spy.mockRestore();
+      }
+      runtime.stop();
+    }
   });
 });
