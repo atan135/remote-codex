@@ -1,94 +1,89 @@
 # Remote Codex
 
 Remote Codex 是供 Codex 使用的受限 HTTPS 出站隧道。它让 edge 机器上的 Codex
-经由公司网络中的 `egress-agent` 访问唯一明确批准的模型网关，同时不把公司机器变成
+经由公司网络中的 `egress-agent` 访问唯一已批准的模型网关，同时不把公司机器变成
 公共入站服务。
 
-本项目与 `remote-client` 完全独立：不得共享地址、域名、部署、用户身份、密钥、凭据、
-数据库或运行时依赖。
+本项目不是远程桌面、远程 shell、终端中继、文件管理器、VPN 或通用代理。它与
+`remote-client` 完全独立：不得共享地址、域名、部署、用户身份、密钥、凭据、数据库或
+运行时依赖。
 
-## 当前实现状态
-
-`shared` 已提供二进制帧、目标验证、身份认证、capability 和流控的共享契约；`server`
-已实现受控 HTTPS/WSS 入口、peer 认证、授权注册表、stream 授权中继、四维资源限额和
-进程内指标。`edge-client` 与 `egress-agent` 的实际代理、拨号和端到端集成仍属于后续
-阶段，当前不应将本仓库视为可直接部署的完整隧道。
-
-目标拓扑如下。两类 peer 均主动连接公共 `server`；公司机器不接受来自互联网的入站
-连接。
+## 组件与边界
 
 ```text
 edge 机器上的 Codex CLI
-  -> edge-client 的 127.0.0.1 本地代理
+  -> edge-client 的 HTTP CONNECT：127.0.0.1:<port>
   -> server 的 WSS /tunnel
-  -> egress-agent 发起的 WSS 连接
+  -> egress-agent 的受认证 WSS 会话
   -> 已批准模型网关的 HTTPS:443
 ```
 
-## Server 职责
+- `edge-client` 是本地 HTTP CONNECT 前端和受认证 WSS 客户端。它只监听 IPv4
+  loopback `127.0.0.1`，只接受 `CONNECT <hostname>:443 HTTP/1.1`。
+- `server` 认证 peer，依据授权注册表将 edge user/device 路由到一个已授权的 agent，
+  签发仅供 agent 使用的短期 capability，并中继二进制 WSS stream。它不建立目标 TCP
+  连接。
+- `egress-agent` 只建立到 server 的出站 WSS 和到精确批准 `hostname:443` 的出站 TCP
+  连接。它没有 TCP、HTTP 或管理监听器。
 
-`server` 是认证和授权后的二进制 WebSocket 帧 broker。它：
+一个 agent 可服务多个 edge 用户或设备，但不共享身份或 stream。唯一的路由来源是
+server 授权注册表中的 active `(edgeUserId, edgeDeviceId) -> agentId` 记录；每条 stream
+仍单独认证、授权、限额和清理。
 
-- 只提供 HTTPS 上的 `GET /health` 和受严格 `Origin` 策略保护的 WSS `/tunnel`。
-- 对 edge device 与 egress agent 执行挑战签名认证，并维护短生命周期 peer session。
-- 依据显式 `edgeUserId`、`edgeDeviceId` 到 `agentId` 的授权记录决定路由；多个已授权
-  的用户和设备可以共享同一 agent。
-- 为每条获准 stream 分配内部 stream ID、签发短期 capability，并按 stream 所有权中继
-  `open`、`data`、`credit` 和 `close` 帧。
-- 在授权、用户、设备、共享 agent 和全局五个层次限制并发流和缓冲字节，并限制开流频率。
-- 输出字段白名单审计记录，以及仅供宿主进程读取的聚合指标快照。
+## 启动前置条件
 
-`server` 不建立模型网关或其他目标的 TCP 连接，不终止或解密目标 HTTPS，也不暴露
-SOCKS、HTTP CONNECT、通用 TCP 转发、指标 HTTP 接口、管理 API 或管理 shell。
+本仓库提供运行时库，不提供部署 CLI。受控宿主负责加载配置、TLS 材料和独立的受保护
+私钥，并按下列顺序管理运行时：
 
-## 必要配置类别
+1. 创建并运行 server，登记 edge 设备、egress agent 的公钥身份以及授权注册表。
+2. 用 `EgressAgentRuntime` 启动 agent，等待其完成 WSS 认证并在线。
+3. 用 `EdgeClientRuntime` 启动 edge runtime，等待其状态为 `online`。
+4. 以该 runtime 作为 `LoopbackConnectProxy` 的 `streamGateway` 创建本地代理，并调用
+   `start()`。`LoopbackConnectProxy` 固定监听 `127.0.0.1`；生产端口应取
+   `EdgeClientConfig.listenPort`。
+5. 仅在 edge runtime 在线且本地代理已成功监听后，才让 Codex 使用 `HTTPS_PROXY`。
 
-当前 `server` 是由宿主程序调用 `createTunnelServer` 创建的运行时库，并未提供命令行
-部署入口。部署集成必须通过受控的进程配置注入下列类别；不得从 WSS 请求、日志或其他
-项目读取它们。
+公开入口包括 `loadEdgeClientConfig`、`EdgeClientRuntime`、`LoopbackConnectProxy`、
+`loadEgressAgentConfig`、`EgressAgentRuntime` 和 `EgressAgentDialer`。认证私钥通过这些
+runtime 的独立受控输入提供，不能写入 JSON 配置、环境展示文本或 URL。安全配置结构见
+[配置示例](docs/configuration-example.md)。
 
-| 类别 | 用途与要求 |
-| --- | --- |
-| TLS 服务端材料 | 提供 HTTPS 证书和私钥；可使用 `loadTlsCredentials` 从明确路径加载。TLS 最低版本为 1.3，且不能设置 `NODE_TLS_REJECT_UNAUTHORIZED=0`。 |
-| Origin 与传输限额 | 指定精确 HTTPS Origin 白名单，以及握手、头部、消息大小和连接速率上限。空白 Origin 策略会使启动失败。 |
-| 可信 peer 身份 | 在创建 server 时登记独立的 edge-device 与 egress-agent Ed25519 公钥身份，可按设备或 agent 设置过期时间。私钥只保留在各自 peer 的受保护存储中。 |
-| 授权注册表 | 注入单调递增 `auditVersion` 的 `AuthorizationRegistryDocument`，保存 user/device 到 agent 的显式绑定、状态、配额和审计时间。 |
-| capability 签名身份 | 注入 server 专用 Ed25519 签名私钥及相应公钥身份；该密钥不得复用为 peer 认证密钥。 |
-| 目标与资源限额 | 注入唯一 `allowedDestination`（端口固定为 `443`）、生命周期限额，以及 user/device/agent/global 的 stream 配额。server 端验证是纵深防御，egress-agent 仍须在拨号前再次验证。 |
-| 审计与监控适配器 | 可接收 server 已序列化的白名单审计 JSON，或在受控宿主内调用 `getMetrics()`；不得将原始 WebSocket frame 交给日志系统。 |
+## Codex 接入
 
-配置中的身份、授权、TLS 与签名材料必须分开保存、最小权限读取并独立轮换。配置示例和
-日志示例不得包含 token、私钥、证书正文、capability、授权头、cookie、请求 payload，或
-任何可连接到 `remote-client` 的信息。
+在启动 edge runtime 和本地代理后，将当前 PowerShell 会话的 `HTTPS_PROXY` 指向实际
+监听端口。例如本地代理监听 `127.0.0.1:8787` 时：
 
-除授权注册表外，当前运行时没有 TLS、peer 身份或 capability 签名身份的热替换接口；这些
-材料变更必须经受控的宿主重建/重启完成。重启会关闭现有 stream，且不会在新会话恢复旧流。
+```powershell
+$env:HTTPS_PROXY = "http://127.0.0.1:8787"
+codex
+```
 
-## 多用户共享 Agent
+代理 URL 必须是 `http://127.0.0.1:<port>`：不得使用局域网或公网地址、`::1`、用户名、
+密码、token、查询参数或 fragment。`HTTPS_PROXY` 只在需要本隧道的 shell 会话中设置；
+使用结束后可清除它：
 
-共享 agent 不是共享身份或共享 stream。每条有效授权以
-`(edgeUserId, edgeDeviceId, agentId)` 为边界；同一 edge user/device 同时只能有一条
-`active` agent 路由，而不同已授权 user/device 可以指向同一个在线 agent。
+```powershell
+Remove-Item Env:HTTPS_PROXY
+```
 
-server 为每条 stream 分配与 edge 原始 ID 不同的内部 ID，capability 精确绑定 user、
-device、agent、内部 ID、批准目标和过期时间。它分别追踪授权、用户、设备、agent 和全局
-的计数、字节和开流速率；错误 peer、错误 ID 或未打开的流都会被拒绝。审计条目也保留各
-自的身份和 stream 元数据，不记录任何流内容。
+该 CONNECT 代理只为批准的模型网关服务。若 edge runtime 未在线、本地代理未监听、目标
+不等于已配置的 hostname:443，或 server/agent 拒绝 stream，连接会失败而不会回退到其他
+路由。
 
-## 运维边界
+## 明确不支持的能力
 
-授权登记、撤销、agent 下线和密钥轮换必须走受控变更流程，不存在可通过公网调用的管理
-接口。授权热更新通过宿主进程持有的 `AuthorizationRegistry` 完成；只有完整候选文档通过
-校验、`auditVersion` 单调递增后才会原子替换。受影响的活跃 stream 会关闭。
+- SOCKS5、普通 HTTP 转发、absolute URL、HTTP/HTTPS proxy auth、`Upgrade`、请求 body 或
+  CONNECT 请求后的额外字节。
+- IPv6、局域网或公网 edge listener；edge 只可绑定 `127.0.0.1`。
+- DNS 放宽、IP literal、通配符主机、重定向、非 `443` 端口和任意 TCP 目标。
+- remote desktop、shell、VPN、文件管理、管理 API 或公网控制面。
 
-受控操作的详细顺序、capability 字段、审计允许字段和验收项见
-[架构文档](docs/architecture.md)。共享契约和线协议见
-[共享契约](docs/shared-contract.md)。
+TLS 应用内容从 Codex 到已批准模型网关端到端保持不透明。server 和 egress-agent 不终止、
+检查、修改或记录 TLS plaintext；日志只允许记录经白名单筛选的 stream 元数据。
 
 ## 开发检查
 
-仓库要求 Node.js `>=22 <23` 与 pnpm `>=10 <11`。可使用以下检查验证当前已实现的
-共享库和 server：
+仓库要求 Node.js `>=22 <23` 与 pnpm `>=10 <11`。在受控开发环境中运行：
 
 ```powershell
 corepack pnpm lint
@@ -97,6 +92,7 @@ corepack pnpm test
 corepack pnpm build
 ```
 
-这些检查不代表 edge-client 到 egress-agent 的端到端能力已经完成。完整网络验收必须在
-后续端实现后验证：只可到达批准网关、非批准 hostname/IP/端口被 egress-agent 拒绝、edge
-监听器严格只绑定 `127.0.0.1`，以及 WSS 断线后不会恢复陈旧 stream。
+网络验收还必须确认：请求只到达已批准网关；不同 hostname、IP literal 和非 `443` 端口在
+egress-agent 的最终验证处失败；非 loopback 无法访问 edge 代理；WSS 断开会关闭旧 stream
+并仅在重新认证后允许新流；日志不含 payload 或凭据。协议与资源契约见
+[共享契约](docs/shared-contract.md)，详细信任边界见[架构文档](docs/architecture.md)。

@@ -29,7 +29,7 @@
 
 | 偏移 | 长度 | 字段 |
 | --- | --- | --- |
-| 0 | 1 | `PROTOCOL_VERSION`，当前为 `1` |
+| 0 | 1 | `PROTOCOL_VERSION`，当前为 `2` |
 | 1 | 1 | 帧类型 |
 | 2 | 2 | flags；当前必须为 `0` |
 | 4 | 16 | 128 位 `streamId` |
@@ -45,7 +45,7 @@
 | 值 | 常量 | 级别 | payload |
 | --- | --- | --- | --- |
 | 1 | `REGISTER` | 连接 | peer 角色、ID、注册随机数 |
-| 2 | `CHALLENGE` | 连接 | 挑战随机数、过期时间 |
+| 2 | `CHALLENGE` | 连接 | 挑战随机数、`issuedAtMs`、`expiresAtMs` |
 | 3 | `AUTHENTICATE` | 连接 | 挑战随机数、Ed25519 签名 |
 | 4 | `HEARTBEAT` | 连接 | sequence |
 | 16 | `STREAM_OPEN` | stream | hostname、`443`、capability |
@@ -115,7 +115,8 @@ requested -> authorized -> connecting -> open -> closing -> closed
 
 配置解析拒绝未知字段、空字符串、错误类型和超出默认值的限额。三个组件均要求
 `component`、其身份字段、`allowedDestination` 和可选的 `limits`；`serverUrl` 只接受
-不含凭据、查询或 fragment 的 `wss:` URL。
+不含凭据、查询或 fragment 的 `wss:` URL。认证私钥不属于 JSON 配置，必须由运行时的
+独立受保护输入提供。
 
 | 组件 | 必填字段 | 可选字段 |
 | --- | --- | --- |
@@ -125,12 +126,14 @@ requested -> authorized -> connecting -> open -> closing -> closed
 
 默认 `allowedDestination` 为 `ai-coding-bj-pub.singularity-ai.com:443`。目标验证会将 hostname
 规范化为 ASCII 小写后精确比较，拒绝 IP literal、通配符、尾点、userinfo、路径、查询、
-fragment 和所有非 `443` 端口。`edge-client.listenHost` 只允许 `127.0.0.1` 或 `::1`。
+fragment 和所有非 `443` 端口。`edge-client.listenHost` 只允许 `127.0.0.1`；IPv6 `::1`、
+局域网与公网监听地址均被拒绝。
 
 ## 身份和 Capability
 
 edge 设备、egress agent、server capability 签名各自使用不同 `IdentityKeyRole` 的 Ed25519
-密钥。认证挑战默认最长有效期为 60 秒，验证签名成功后才消耗 nonce。server 签发的
-capability 同样最长有效 60 秒，并精确绑定 `edgeUserId`、`edgeDeviceId`、`agentId`、
-`streamId`、hostname 和端口。egress-agent 在 TCP 拨号前必须验证 capability 并再次调用
-`validateDestination`；capability 只能消费一次。
+密钥。认证挑战默认最长有效期为 60 秒，`CHALLENGE` wire payload 中的 `nonce`、
+`issuedAtMs` 和 `expiresAtMs` 都是认证签名输入；peer 不得猜测签发时间。验证签名成功后才
+消耗 nonce。server 签发的 capability 同样最长有效 60 秒，并精确绑定 `edgeUserId`、
+`edgeDeviceId`、`agentId`、`streamId`、hostname 和端口。egress-agent 在 TCP 拨号前必须
+验证 capability 并再次调用 `validateDestination`；capability 只能消费一次。

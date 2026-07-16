@@ -14,7 +14,7 @@
 - `egress-agent` 运行在公司机器上，向已批准的目标发起连接；它只创建出站 WSS
   和已批准的出站 TCP 连接。
 - `edge-client` 运行在家庭电脑或在线服务器上，只暴露绑定到 `127.0.0.1` 的本地
-  SOCKS5 或 HTTP CONNECT 监听器。
+  HTTP CONNECT 监听器；SOCKS5 不在当前范围内。
 - `shared` 负责协议 schema、认证原语、流生命周期、流量控制和验证辅助函数。
 - 不得添加对 `remote-client` 的运行时依赖，也不得使用其凭据、数据库、WebSocket
   endpoint 或部署资源。
