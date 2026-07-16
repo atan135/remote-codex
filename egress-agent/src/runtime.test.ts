@@ -5,14 +5,19 @@ import {
   createEgressAgentIdentity,
   createIdentityPrivateKey,
   createIdentityPublicKey,
+  createServerSigningCredentials,
+  createServerSigningIdentity,
+  createStreamId,
   decodeFrame,
   decodeFramePayload,
   encodeChallengePayload,
   encodeFrame,
   encodeHeartbeatPayload,
+  encodeStreamOpenPayload,
   FrameType,
   IdentityKeyRole,
   issueAuthenticationChallenge,
+  issueCapability,
   parseEgressAgentConfig,
   streamFrame
 } from "@remote-codex/shared";
@@ -26,6 +31,7 @@ import {
   type AgentSocket,
   type AgentSocketFactory
 } from "./runtime.js";
+import type { AgentTcpConnector, AgentTcpSocket } from "./dialer.js";
 
 const initialTlsVerificationSetting = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
 
@@ -93,6 +99,29 @@ class FakeSocketFactory implements AgentSocketFactory {
   }
 }
 
+class FakeTcpSocket implements AgentTcpSocket {
+  private readonly listeners = new Map<"connect" | "error" | "end" | "close", () => void>();
+
+  public end(): void {}
+
+  public destroy(): void {}
+
+  public setTimeout(): void {}
+
+  public once(event: "connect" | "error" | "end" | "close", listener: () => void): void {
+    this.listeners.set(event, listener);
+  }
+}
+
+class FakeTcpConnector implements AgentTcpConnector {
+  public readonly calls: Array<Readonly<{ hostname: string; port: 443 }>> = [];
+
+  public connect(destination: Readonly<{ hostname: string; port: 443 }>): AgentTcpSocket {
+    this.calls.push({ ...destination });
+    return new FakeTcpSocket();
+  }
+}
+
 function createConfig(maxReconnectAttempts = 2) {
   return parseEgressAgentConfig({
     component: "egress-agent",
@@ -130,6 +159,26 @@ function createIdentity() {
     )
   });
   return { authenticationIdentity, authenticationKey };
+}
+
+function createServerCapabilityCredentials() {
+  const keys = generateKeyPairSync("ed25519");
+  const keyId = "server-capability-key-1";
+  const identity = createServerSigningIdentity({
+    serverId: "public-server-1",
+    capabilityVerificationKey: createIdentityPublicKey(
+      { role: IdentityKeyRole.SERVER_CAPABILITY_SIGNING, keyId },
+      keys.publicKey
+    )
+  });
+  const credentials = createServerSigningCredentials({
+    identity,
+    capabilitySigningKey: createIdentityPrivateKey(
+      { role: IdentityKeyRole.SERVER_CAPABILITY_SIGNING, keyId },
+      keys.privateKey
+    )
+  });
+  return { identity, credentials };
 }
 
 function latestFrame(socket: FakeSocket) {
@@ -213,6 +262,61 @@ describe("egress agent persistent WSS session", () => {
     expect(() => loadEgressAgentConfig('{"component":"egress-agent","secret":"not-for-logs"}')).toThrow(
       EgressAgentRuntimeError
     );
+  });
+
+  it("routes only an authenticated, capability-bound stream.open to the local restricted connector", () => {
+    const config = createConfig();
+    const sockets = new FakeSocketFactory();
+    const connector = new FakeTcpConnector();
+    const { identity: capabilityServerIdentity, credentials } = createServerCapabilityCredentials();
+    const runtime = new EgressAgentRuntime({
+      config,
+      ...createIdentity(),
+      origin: "https://agent.example.test",
+      capabilityServerIdentity,
+      connector,
+      socketFactory: sockets,
+      now: () => 1_000,
+      randomBytes: (size) => Uint8Array.from({ length: size }, (_, index) => index + 1)
+    });
+    const streamId = createStreamId();
+    const capability = issueCapability({
+      credentials,
+      binding: {
+        edgeUserId: "edge-user-1",
+        edgeDeviceId: "edge-device-1",
+        agentId: config.agentId,
+        streamId,
+        destination: config.allowedDestination
+      },
+      allowedDestination: config.allowedDestination,
+      nowMs: 1_000,
+      ttlMs: 100,
+      randomBytes: (size) => Uint8Array.from({ length: size }, (_, index) => index + 10)
+    });
+
+    runtime.start();
+    const socket = sockets.sockets[0];
+    if (socket === undefined) {
+      throw new Error("expected the first socket");
+    }
+    authenticate(socket, 1_000);
+    socket.emitMessage(
+      encodeFrame(
+        streamFrame(
+          FrameType.STREAM_OPEN,
+          streamId,
+          encodeStreamOpenPayload({
+            hostname: config.allowedDestination.hostname,
+            port: 443,
+            capability
+          })
+        )
+      )
+    );
+
+    expect(connector.calls).toEqual([{ hostname: config.allowedDestination.hostname, port: 443 }]);
+    expect(runtime.getStatus()).toEqual({ state: "online", reconnectAttempts: 0 });
   });
 
   it("does not retry an authentication failure", () => {

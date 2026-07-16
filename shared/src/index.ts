@@ -83,6 +83,8 @@ export {
   signAuthenticationChallenge,
   verifyAuthenticationChallenge,
   verifyCapability,
+  verifyCapabilityForAgent,
+  type AgentCapabilityVerificationInput,
   type AuthenticationChallengeOptions,
   type AuthenticationProofInput,
   type AuthenticationVerificationInput,

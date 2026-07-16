@@ -87,7 +87,8 @@ describe("shared public entry point", () => {
       "streamFrame",
       "validateDestination",
       "verifyAuthenticationChallenge",
-      "verifyCapability"
+      "verifyCapability",
+      "verifyCapabilityForAgent"
     ]);
   });
 });

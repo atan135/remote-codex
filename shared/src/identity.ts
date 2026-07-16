@@ -161,6 +161,25 @@ export interface CapabilityVerificationInput {
   readonly nowMs: number;
 }
 
+/**
+ * egress agent 只能从 `stream.open` 得到 stream ID 与目标，edge 用户和设备
+ * 身份仅由 server 的 capability 签名携带。该输入保留 agent 能独立验证的全部
+ * 固定绑定字段，并要求 capability 内的 edge 身份字段通过严格格式和签名校验。
+ */
+export interface AgentCapabilityVerificationInput {
+  readonly capability: Uint8Array;
+  readonly serverIdentity: ServerSigningIdentity;
+  readonly agentId: string;
+  readonly streamId: Uint8Array;
+  readonly destination: {
+    readonly hostname: string;
+    readonly port: 443;
+  };
+  readonly allowedDestination: AllowedDestination;
+  readonly replayProtector: CapabilityReplayProtector;
+  readonly nowMs: number;
+}
+
 export type CapabilityVerificationResult =
   | { readonly ok: true; readonly capability: VerifiedCapability }
   | { readonly ok: false; readonly errorCode: typeof TunnelErrorCode.CAPABILITY_INVALID };
@@ -913,6 +932,32 @@ export function verifyCapability(input: CapabilityVerificationInput): Capability
         signingKeyId: parsed.signingKeyId
       })
     };
+  } catch {
+    return { ok: false, errorCode: TunnelErrorCode.CAPABILITY_INVALID };
+  }
+}
+
+/**
+ * 最终 agent 校验：edge 身份由服务端签名作为授权声明，agent 对本地 agent ID、
+ * 当前 stream ID 与本地固定目标进行精确比较。任何能力字段或签名异常均统一失败。
+ */
+export function verifyCapabilityForAgent(input: AgentCapabilityVerificationInput): CapabilityVerificationResult {
+  try {
+    const parsed = decodeCapability(input.capability);
+    return verifyCapability({
+      capability: input.capability,
+      serverIdentity: input.serverIdentity,
+      expectedBinding: {
+        edgeUserId: parsed.binding.edgeUserId,
+        edgeDeviceId: parsed.binding.edgeDeviceId,
+        agentId: input.agentId,
+        streamId: input.streamId,
+        destination: input.destination
+      },
+      allowedDestination: input.allowedDestination,
+      replayProtector: input.replayProtector,
+      nowMs: input.nowMs
+    });
   } catch {
     return { ok: false, errorCode: TunnelErrorCode.CAPABILITY_INVALID };
   }

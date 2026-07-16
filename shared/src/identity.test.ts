@@ -19,7 +19,8 @@ import {
   NonceReplayProtector,
   signAuthenticationChallenge,
   verifyAuthenticationChallenge,
-  verifyCapability
+  verifyCapability,
+  verifyCapabilityForAgent
 } from "./identity.js";
 import type { CapabilityBinding, ServerSigningCredentials, ServerSigningIdentity } from "./identity.js";
 import { createStreamId, TunnelErrorCode } from "./protocol.js";
@@ -253,6 +254,44 @@ describe("identity material and authentication", () => {
 });
 
 describe("short-lived stream capability", () => {
+  it("allows an agent to verify its local binding while retaining signed edge identity fields", () => {
+    const { serverCredentials, serverIdentity } = createFixture();
+    const expectedBinding = binding();
+    const capability = issueCapability({
+      credentials: serverCredentials,
+      binding: expectedBinding,
+      allowedDestination: DEFAULT_ALLOWED_DESTINATION,
+      nowMs: NOW_MS,
+      ttlMs: 5_000,
+      randomBytes: deterministicBytes(35)
+    });
+
+    expect(
+      verifyCapabilityForAgent({
+        capability,
+        serverIdentity,
+        agentId: expectedBinding.agentId,
+        streamId: expectedBinding.streamId,
+        destination: expectedBinding.destination,
+        allowedDestination: DEFAULT_ALLOWED_DESTINATION,
+        replayProtector: new CapabilityReplayProtector(),
+        nowMs: NOW_MS + 1
+      })
+    ).toMatchObject({ ok: true, capability: { binding: expectedBinding } });
+    expect(
+      verifyCapabilityForAgent({
+        capability,
+        serverIdentity,
+        agentId: "other-agent",
+        streamId: expectedBinding.streamId,
+        destination: expectedBinding.destination,
+        allowedDestination: DEFAULT_ALLOWED_DESTINATION,
+        replayProtector: new CapabilityReplayProtector(),
+        nowMs: NOW_MS + 1
+      })
+    ).toEqual({ ok: false, errorCode: TunnelErrorCode.CAPABILITY_INVALID });
+  });
+
   it("creates a compact binary capability and accepts its exact binding once", () => {
     const { serverCredentials, serverIdentity } = createFixture();
     const expectedBinding = binding();

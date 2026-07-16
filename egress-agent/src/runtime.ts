@@ -14,6 +14,7 @@ import {
   IdentityKeyRole,
   parseEgressAgentConfig,
   signAuthenticationChallenge,
+  type ServerSigningIdentity,
   type EgressAgentConfig,
   type EgressAgentIdentity,
   type IdentityPrivateKey,
@@ -21,6 +22,13 @@ import {
 } from "@remote-codex/shared";
 import WebSocket from "ws";
 import type { RawData } from "ws";
+
+import {
+  EgressAgentDialer,
+  type AgentTcpConnector,
+  type EgressAgentStreamResources,
+  type EgressAgentStreamSession
+} from "./dialer.js";
 
 const WEBSOCKET_CLOSE_CODE_PROTOCOL = 1002;
 const AUTHENTICATION_FAILURE_CODES = new Set(["AUTH_FAILED", "AUTH_EXPIRED", "AUTH_REPLAYED", "AUTH_UNAUTHORIZED"]);
@@ -34,15 +42,6 @@ export interface EgressAgentStatusSnapshot {
 }
 
 export type EgressAgentStatusListener = (status: EgressAgentStatusSnapshot) => void;
-
-/**
- * 阶段 2 的拨号器会实现此接口。会话失效时必须停止读取并销毁所有关联 TCP
- * socket，且清空 stream 到 socket 的映射。此阶段只调用该清理边界，不创建 TCP
- * 连接。
- */
-export interface EgressAgentStreamResources {
-  closeAll(): void;
-}
 
 export interface AgentSocket {
   send(data: Uint8Array): void;
@@ -66,6 +65,10 @@ export interface EgressAgentRuntimeOptions {
   readonly authenticationKey: IdentityPrivateKey<typeof IdentityKeyRole.EGRESS_AGENT_AUTHENTICATION>;
   /** 由本地部署配置的 HTTPS Origin；不得从服务端或 stream 读取。 */
   readonly origin: string;
+  /** server capability 验签公钥身份，仅由本地部署注入。 */
+  readonly capabilityServerIdentity?: ServerSigningIdentity;
+  /** 测试可替换 connector；生产默认实现只拨号本地配置的 hostname:443。 */
+  readonly connector?: AgentTcpConnector;
   readonly streamResources?: EgressAgentStreamResources;
   readonly socketFactory?: AgentSocketFactory;
   readonly now?: () => number;
@@ -236,8 +239,8 @@ export function loadEgressAgentConfig(serializedConfig: string): EgressAgentConf
 }
 
 /**
- * 只维护 egress agent 到 server 的受认证 WSS 会话。它没有 TCP listener，且本
- * 阶段不会建立任何目标 TCP 连接。
+ * 维护 egress agent 到 server 的受认证 WSS 会话，并把已认证的 stream 帧交给
+ * 本地最终拨号边界。它没有 TCP listener，且绝不接受任意目标或代理协议。
  */
 export class EgressAgentRuntime {
   private readonly config: EgressAgentConfig;
@@ -264,9 +267,26 @@ export class EgressAgentRuntime {
     this.authenticationIdentity = options.authenticationIdentity;
     this.authenticationKey = options.authenticationKey;
     this.origin = parseOrigin(options.origin);
-    this.streamResources = options.streamResources ?? { closeAll: () => undefined };
-    this.socketFactory = options.socketFactory ?? new DefaultAgentSocketFactory();
     this.now = options.now ?? Date.now;
+    if (options.streamResources !== undefined && (options.capabilityServerIdentity !== undefined || options.connector !== undefined)) {
+      fail("AGENT_STREAM_RESOURCES_CONFLICT");
+    }
+
+    if (options.connector !== undefined && options.capabilityServerIdentity === undefined) {
+      fail("AGENT_CAPABILITY_IDENTITY_REQUIRED");
+    }
+
+    this.streamResources =
+      options.streamResources ??
+      (options.capabilityServerIdentity === undefined
+        ? { closeAll: () => undefined }
+        : new EgressAgentDialer({
+            config: this.config,
+            capabilityServerIdentity: options.capabilityServerIdentity,
+            ...(options.connector === undefined ? {} : { connector: options.connector }),
+            now: this.now
+          }));
+    this.socketFactory = options.socketFactory ?? new DefaultAgentSocketFactory();
     this.random = options.random ?? Math.random;
     this.randomBytes = options.randomBytes ?? ((size: number) => Uint8Array.from(nodeRandomBytes(size)));
 
@@ -459,7 +479,20 @@ export class EgressAgentRuntime {
         return;
       }
 
-      // 拨号和 stream 帧处理属于后续阶段；当前会话绝不因此读取或打开目标连接。
+      if (connection.phase === "online" && frame.type >= FrameType.STREAM_OPEN) {
+        if (this.streamResources.handleFrame === undefined) {
+          throw new EgressAgentRuntimeError("PROTOCOL_VIOLATION");
+        }
+
+        const session: EgressAgentStreamSession = {
+          id: connection,
+          nowMs: this.now(),
+          send: (outboundFrame) => this.send(connection, outboundFrame)
+        };
+        this.streamResources.handleFrame(session, frame);
+        return;
+      }
+
       throw new EgressAgentRuntimeError("PROTOCOL_VIOLATION");
     } catch (error: unknown) {
       const code = error instanceof EgressAgentRuntimeError ? error.code : "PROTOCOL_VIOLATION";
@@ -564,12 +597,13 @@ export class EgressAgentRuntime {
     timerUnref(this.heartbeatTimer);
   }
 
-  private send(connection: AgentConnection, frame: ReturnType<typeof connectionFrame>): void {
+  private send(connection: AgentConnection, frame: ReturnType<typeof connectionFrame>): boolean {
     if (!this.isActive(connection)) {
-      return;
+      return false;
     }
 
     connection.socket.send(encodeFrame(frame));
+    return true;
   }
 
   private closeAllStreams(): boolean {
