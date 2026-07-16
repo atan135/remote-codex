@@ -12,5 +12,18 @@ export {
   type LoopbackConnectProxyOptions
 } from "./connect-proxy.js";
 
+export {
+  calculateEdgeReconnectDelayMs,
+  EdgeClientRuntime,
+  EdgeClientRuntimeError,
+  loadEdgeClientConfig,
+  type EdgeClientRuntimeOptions,
+  type EdgeClientState,
+  type EdgeClientStatusListener,
+  type EdgeClientStatusSnapshot,
+  type EdgeSocket,
+  type EdgeSocketFactory
+} from "./runtime.js";
+
 export const packageName = "@remote-codex/edge-client" as const;
 export const sharedProtocolVersion: EdgeClientConfig["protocolVersion"] = PROTOCOL_VERSION;

@@ -4,7 +4,11 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@remote-codex/shared": "workspace:*"
+    "@remote-codex/shared": "workspace:*",
+    "ws": "8.18.3"
+  },
+  "devDependencies": {
+    "@types/ws": "8.5.14"
   },
   "scripts": {
     "lint": "eslint src --max-warnings=0",

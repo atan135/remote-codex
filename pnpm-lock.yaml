@@ -35,6 +35,13 @@ importers:
       '@remote-codex/shared':
         specifier: workspace:*
         version: link:../shared
+      ws:
+        specifier: 8.18.3
+        version: 8.18.3
+    devDependencies:
+      '@types/ws':
+        specifier: 8.5.14
+        version: 8.5.14
 
   egress-agent:
     dependencies:
