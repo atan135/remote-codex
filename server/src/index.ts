@@ -3,6 +3,7 @@ import type { ServerConfig } from "@remote-codex/shared";
 
 export {
   createTunnelServer,
+  DEFAULT_PEER_HEARTBEAT_TIMEOUT_MS,
   DEFAULT_SERVER_TRANSPORT_LIMITS,
   HEALTH_CHECK_PATH,
   loadTlsCredentials,
@@ -14,6 +15,15 @@ export {
   type TunnelServer,
   type TunnelServerOptions
 } from "./runtime.js";
+
+export {
+  PeerSessionError,
+  PeerSessionManager,
+  type AuthenticatedPeerSession,
+  type PeerAuthenticationMetadata,
+  type PeerSessionManagerOptions,
+  type ServerPeerIdentityRegistration
+} from "./peer-session.js";
 
 export const packageName = "@remote-codex/server" as const;
 export const sharedProtocolVersion: ServerConfig["protocolVersion"] = PROTOCOL_VERSION;

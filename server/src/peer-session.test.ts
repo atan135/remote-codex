@@ -1,0 +1,423 @@
+import { once } from "node:events";
+import { generateKeyPairSync } from "node:crypto";
+import type { AddressInfo } from "node:net";
+
+import {
+  connectionFrame,
+  createEdgeDeviceIdentity,
+  createEgressAgentIdentity,
+  createIdentityPrivateKey,
+  createIdentityPublicKey,
+  decodeChallengePayload,
+  decodeFrame,
+  encodeAuthenticatePayload,
+  encodeFrame,
+  encodeHeartbeatPayload,
+  encodeRegisterPayload,
+  FrameType,
+  IdentityKeyRole,
+  signAuthenticationChallenge,
+  type EdgeDeviceIdentity,
+  type EgressAgentIdentity,
+  type IdentityPrivateKey,
+  type PeerRole,
+  type RegisterPayload
+} from "@remote-codex/shared";
+import selfsigned from "selfsigned";
+import WebSocket from "ws";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+
+import {
+  createTunnelServer,
+  type ServerPeerIdentityRegistration,
+  type TlsCredentials,
+  type TunnelServer
+} from "./index.js";
+
+const TEST_ORIGIN = "https://edge.example.test";
+let testTlsCredentials: TlsCredentials;
+let runningServer: TunnelServer | undefined;
+const initialTlsVerificationSetting = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+
+interface AuthenticationFixture {
+  readonly edgeIdentity: EdgeDeviceIdentity;
+  readonly edgePrivateKey: IdentityPrivateKey<typeof IdentityKeyRole.EDGE_DEVICE_AUTHENTICATION>;
+  readonly agentIdentity: EgressAgentIdentity;
+  readonly agentPrivateKey: IdentityPrivateKey<typeof IdentityKeyRole.EGRESS_AGENT_AUTHENTICATION>;
+}
+
+interface ConnectedPeer {
+  readonly socket: WebSocket;
+  readonly registration: RegisterPayload;
+}
+
+beforeAll(() => {
+  delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+  const certificate = selfsigned.generate([{ name: "commonName", value: "localhost" }], {
+    algorithm: "sha256",
+    days: 1,
+    keySize: 2048
+  });
+  testTlsCredentials = {
+    certificate: Buffer.from(certificate.cert),
+    privateKey: Buffer.from(certificate.private)
+  };
+});
+
+afterAll(() => {
+  if (initialTlsVerificationSetting === undefined) {
+    delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+    return;
+  }
+
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = initialTlsVerificationSetting;
+});
+
+afterEach(async () => {
+  await runningServer?.close();
+  runningServer = undefined;
+});
+
+function nonce(seed: number): Uint8Array {
+  return Uint8Array.from({ length: 32 }, (_, index) => (seed + index) % 256);
+}
+
+function createFixture(): AuthenticationFixture {
+  const edgeKeys = generateKeyPairSync("ed25519");
+  const agentKeys = generateKeyPairSync("ed25519");
+  const edgePrivateKey = createIdentityPrivateKey(
+    { role: IdentityKeyRole.EDGE_DEVICE_AUTHENTICATION, keyId: "edge-key-1" },
+    edgeKeys.privateKey
+  );
+  const agentPrivateKey = createIdentityPrivateKey(
+    { role: IdentityKeyRole.EGRESS_AGENT_AUTHENTICATION, keyId: "agent-key-1" },
+    agentKeys.privateKey
+  );
+
+  return {
+    edgeIdentity: createEdgeDeviceIdentity({
+      edgeUserId: "edge-user-1",
+      edgeDeviceId: "edge-device-1",
+      authenticationKey: createIdentityPublicKey(
+        { role: IdentityKeyRole.EDGE_DEVICE_AUTHENTICATION, keyId: "edge-key-1" },
+        edgeKeys.publicKey
+      )
+    }),
+    edgePrivateKey,
+    agentIdentity: createEgressAgentIdentity({
+      agentId: "company-agent-1",
+      authenticationKey: createIdentityPublicKey(
+        { role: IdentityKeyRole.EGRESS_AGENT_AUTHENTICATION, keyId: "agent-key-1" },
+        agentKeys.publicKey
+      )
+    }),
+    agentPrivateKey
+  };
+}
+
+async function startServer(
+  peerIdentities: readonly ServerPeerIdentityRegistration[],
+  overrides: Partial<Pick<Parameters<typeof createTunnelServer>[0], "heartbeatTimeoutMs" | "authenticationTimeoutMs">> = {}
+): Promise<string> {
+  runningServer = createTunnelServer({
+    tls: testTlsCredentials,
+    allowedOrigins: [TEST_ORIGIN],
+    peerIdentities,
+    heartbeatTimeoutMs: 500,
+    authenticationTimeoutMs: 500,
+    ...overrides
+  });
+  runningServer.httpsServer.listen(0, "127.0.0.1");
+  await once(runningServer.httpsServer, "listening");
+  const address = runningServer.httpsServer.address() as AddressInfo;
+  return `wss://127.0.0.1:${address.port}`;
+}
+
+function openSocket(url: string): Promise<WebSocket> {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(`${url}/tunnel`, { origin: TEST_ORIGIN, rejectUnauthorized: false });
+    socket.once("open", () => resolve(socket));
+    socket.once("error", reject);
+  });
+}
+
+function nextFrame(socket: WebSocket): Promise<ReturnType<typeof decodeFrame>> {
+  return new Promise((resolve, reject) => {
+    socket.once("message", (data, isBinary) => {
+      if (!isBinary || !Buffer.isBuffer(data)) {
+        reject(new Error("expected a binary frame"));
+        return;
+      }
+
+      try {
+        resolve(decodeFrame(data));
+      } catch (error: unknown) {
+        reject(error);
+      }
+    });
+    socket.once("error", reject);
+  });
+}
+
+function closeResult(socket: WebSocket): Promise<readonly [number, Buffer]> {
+  return new Promise((resolve) => {
+    socket.once("close", (code, reason) => resolve([code, reason]));
+  });
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error("timed out waiting for condition");
+    }
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+async function authenticate(
+  url: string,
+  identity: EdgeDeviceIdentity | EgressAgentIdentity,
+  privateKey:
+    | IdentityPrivateKey<typeof IdentityKeyRole.EDGE_DEVICE_AUTHENTICATION>
+    | IdentityPrivateKey<typeof IdentityKeyRole.EGRESS_AGENT_AUTHENTICATION>,
+  role: PeerRole,
+  registrationNonce: Uint8Array
+): Promise<ConnectedPeer> {
+  const socket = await openSocket(url);
+  const registration: RegisterPayload = {
+    role,
+    peerId: identity.kind === "edge-device" ? identity.edgeDeviceId : identity.agentId,
+    nonce: registrationNonce
+  };
+  const challengePromise = nextFrame(socket);
+  socket.send(encodeFrame(connectionFrame(FrameType.REGISTER, encodeRegisterPayload(registration))), { binary: true });
+  const challengeFrame = await challengePromise;
+  expect(challengeFrame.type).toBe(FrameType.CHALLENGE);
+  const challenge = {
+    issuedAtMs: 0,
+    payload: decodeChallengePayload(challengeFrame.payload)
+  };
+  challenge.issuedAtMs = challenge.payload.expiresAtMs - 500;
+  const response = signAuthenticationChallenge({ identity, signingKey: privateKey, registration, challenge });
+  const confirmationPromise = nextFrame(socket);
+  socket.send(
+    encodeFrame(connectionFrame(FrameType.AUTHENTICATE, encodeAuthenticatePayload(response))),
+    { binary: true }
+  );
+  const confirmation = await confirmationPromise;
+  expect(confirmation.type).toBe(FrameType.HEARTBEAT);
+  expect(encodeFrame(confirmation)).toEqual(
+    encodeFrame(connectionFrame(FrameType.HEARTBEAT, encodeHeartbeatPayload({ sequence: 0 })))
+  );
+  return { socket, registration };
+}
+
+describe("WSS peer registration and session management", () => {
+  it("authenticates independently registered edge and agent peers and retains metadata only", async () => {
+    const fixture = createFixture();
+    const url = await startServer([{ identity: fixture.edgeIdentity }, { identity: fixture.agentIdentity }]);
+    const edge = await authenticate(url, fixture.edgeIdentity, fixture.edgePrivateKey, "edge-client", nonce(1));
+    const agent = await authenticate(url, fixture.agentIdentity, fixture.agentPrivateKey, "egress-agent", nonce(2));
+
+    await waitFor(() => runningServer?.peerSessions.getActiveSessions().length === 2);
+    const sessions = runningServer?.peerSessions.getActiveSessions() ?? [];
+    const edgeSession = sessions.find((session) => session.role === "edge-client");
+    const agentSession = sessions.find((session) => session.role === "egress-agent");
+
+    expect(edgeSession).toMatchObject({
+      identity: { kind: "edge-device", edgeUserId: "edge-user-1", edgeDeviceId: "edge-device-1" },
+      protocolVersion: 1
+    });
+    expect(agentSession).toMatchObject({ identity: { kind: "egress-agent", agentId: "company-agent-1" }, protocolVersion: 1 });
+    expect(edgeSession?.peerId).not.toBe(edge.registration.peerId);
+    expect(agentSession?.peerId).not.toBe(agent.registration.peerId);
+
+    edge.socket.send(
+      encodeFrame(connectionFrame(FrameType.HEARTBEAT, encodeHeartbeatPayload({ sequence: 7 }))),
+      { binary: true }
+    );
+    await waitFor(() => runningServer?.peerSessions.getSession(edgeSession?.peerId ?? "")?.lastHeartbeatSequence === 7);
+  });
+
+  it("rejects role mismatches, expired identities, bad signatures, and unsupported protocol versions", async () => {
+    const fixture = createFixture();
+    const expiredFixture = createFixture();
+    const url = await startServer([
+      { identity: fixture.agentIdentity },
+      { identity: expiredFixture.edgeIdentity, expiresAtMs: Date.now() - 1 }
+    ]);
+
+    const wrongRoleSocket = await openSocket(url);
+    const wrongRoleClose = closeResult(wrongRoleSocket);
+    wrongRoleSocket.send(
+      encodeFrame(
+        connectionFrame(
+          FrameType.REGISTER,
+          encodeRegisterPayload({ role: "edge-client", peerId: fixture.agentIdentity.agentId, nonce: nonce(10) })
+        )
+      ),
+      { binary: true }
+    );
+    await expect(wrongRoleClose).resolves.toEqual([1008, Buffer.from("AUTH_UNAUTHORIZED")]);
+
+    const expiredSocket = await openSocket(url);
+    const expiredClose = closeResult(expiredSocket);
+    expiredSocket.send(
+      encodeFrame(
+        connectionFrame(
+          FrameType.REGISTER,
+          encodeRegisterPayload({
+            role: "edge-client",
+            peerId: expiredFixture.edgeIdentity.edgeDeviceId,
+            nonce: nonce(11)
+          })
+        )
+      ),
+      { binary: true }
+    );
+    await expect(expiredClose).resolves.toEqual([1008, Buffer.from("AUTH_EXPIRED")]);
+
+    const badSignatureSocket = await openSocket(url);
+    const registration: RegisterPayload = {
+      role: "egress-agent",
+      peerId: fixture.agentIdentity.agentId,
+      nonce: nonce(12)
+    };
+    const challengePromise = nextFrame(badSignatureSocket);
+    badSignatureSocket.send(
+      encodeFrame(connectionFrame(FrameType.REGISTER, encodeRegisterPayload(registration))),
+      { binary: true }
+    );
+    const challengeFrame = await challengePromise;
+    const challenge = { issuedAtMs: decodeChallengePayload(challengeFrame.payload).expiresAtMs - 500, payload: decodeChallengePayload(challengeFrame.payload) };
+    const response = signAuthenticationChallenge({
+      identity: fixture.agentIdentity,
+      signingKey: fixture.agentPrivateKey,
+      registration,
+      challenge
+    });
+    const signature = Uint8Array.from(response.signature);
+    signature[0] = (signature[0] ?? 0) ^ 1;
+    const badSignatureClose = closeResult(badSignatureSocket);
+    badSignatureSocket.send(
+      encodeFrame(
+        connectionFrame(
+          FrameType.AUTHENTICATE,
+          encodeAuthenticatePayload({ challengeNonce: response.challengeNonce, signature })
+        )
+      ),
+      { binary: true }
+    );
+    await expect(badSignatureClose).resolves.toEqual([1008, Buffer.from("AUTH_FAILED")]);
+
+    const incompatibleSocket = await openSocket(url);
+    const incompatibleClose = closeResult(incompatibleSocket);
+    const incompatibleFrame = encodeFrame(
+      connectionFrame(
+        FrameType.REGISTER,
+        encodeRegisterPayload({ role: "egress-agent", peerId: fixture.agentIdentity.agentId, nonce: nonce(13) })
+      )
+    );
+    incompatibleFrame[0] = 2;
+    incompatibleSocket.send(incompatibleFrame, { binary: true });
+    await expect(incompatibleClose).resolves.toEqual([1002, Buffer.from("PROTOCOL_VIOLATION")]);
+    expect(runningServer?.peerSessions.getPendingConnectionCount()).toBe(0);
+  });
+
+  it("rejects a reused registration nonce after a valid second challenge", async () => {
+    const fixture = createFixture();
+    const url = await startServer([{ identity: fixture.agentIdentity }]);
+    await authenticate(url, fixture.agentIdentity, fixture.agentPrivateKey, "egress-agent", nonce(20));
+    await waitFor(() => runningServer?.peerSessions.getActiveSessions().length === 1);
+
+    const replaySocket = await openSocket(url);
+    const registration: RegisterPayload = {
+      role: "egress-agent",
+      peerId: fixture.agentIdentity.agentId,
+      nonce: nonce(20)
+    };
+    const challengePromise = nextFrame(replaySocket);
+    replaySocket.send(
+      encodeFrame(connectionFrame(FrameType.REGISTER, encodeRegisterPayload(registration))),
+      { binary: true }
+    );
+    const challengeFrame = await challengePromise;
+    const challengePayload = decodeChallengePayload(challengeFrame.payload);
+    const response = signAuthenticationChallenge({
+      identity: fixture.agentIdentity,
+      signingKey: fixture.agentPrivateKey,
+      registration,
+      challenge: { issuedAtMs: challengePayload.expiresAtMs - 500, payload: challengePayload }
+    });
+    const replayClose = closeResult(replaySocket);
+    replaySocket.send(
+      encodeFrame(connectionFrame(FrameType.AUTHENTICATE, encodeAuthenticatePayload(response))),
+      { binary: true }
+    );
+    await expect(replayClose).resolves.toEqual([1008, Buffer.from("AUTH_REPLAYED")]);
+    expect(runningServer?.peerSessions.getActiveSessions()).toHaveLength(1);
+  });
+
+  it("rejects an identity that expires after registration but before its signed response", async () => {
+    const fixture = createFixture();
+    const url = await startServer([{ identity: fixture.edgeIdentity, expiresAtMs: Date.now() + 100 }]);
+    const socket = await openSocket(url);
+    const registration: RegisterPayload = {
+      role: "edge-client",
+      peerId: fixture.edgeIdentity.edgeDeviceId,
+      nonce: nonce(25)
+    };
+    const challengePromise = nextFrame(socket);
+    socket.send(
+      encodeFrame(connectionFrame(FrameType.REGISTER, encodeRegisterPayload(registration))),
+      { binary: true }
+    );
+    const challengeFrame = await challengePromise;
+    const challengePayload = decodeChallengePayload(challengeFrame.payload);
+    await new Promise<void>((resolve) => setTimeout(resolve, 120));
+    const response = signAuthenticationChallenge({
+      identity: fixture.edgeIdentity,
+      signingKey: fixture.edgePrivateKey,
+      registration,
+      challenge: { issuedAtMs: challengePayload.expiresAtMs - 500, payload: challengePayload }
+    });
+    const closed = closeResult(socket);
+    socket.send(
+      encodeFrame(connectionFrame(FrameType.AUTHENTICATE, encodeAuthenticatePayload(response))),
+      { binary: true }
+    );
+
+    await expect(closed).resolves.toEqual([1008, Buffer.from("AUTH_EXPIRED")]);
+    expect(runningServer?.peerSessions.getPendingConnectionCount()).toBe(0);
+  });
+
+  it("revokes sessions that miss the heartbeat deadline", async () => {
+    const fixture = createFixture();
+    const url = await startServer([{ identity: fixture.edgeIdentity }], { heartbeatTimeoutMs: 25 });
+    const edge = await authenticate(url, fixture.edgeIdentity, fixture.edgePrivateKey, "edge-client", nonce(30));
+    const closed = closeResult(edge.socket);
+
+    await expect(closed).resolves.toEqual([1008, Buffer.from("HEARTBEAT_TIMEOUT")]);
+    expect(runningServer?.peerSessions.getActiveSessions()).toHaveLength(0);
+  });
+
+  it("replaces an authenticated agent connection only after the new session succeeds", async () => {
+    const fixture = createFixture();
+    const url = await startServer([{ identity: fixture.agentIdentity }]);
+    const first = await authenticate(url, fixture.agentIdentity, fixture.agentPrivateKey, "egress-agent", nonce(40));
+    await waitFor(() => runningServer?.peerSessions.getActiveSessions().length === 1);
+    const firstPeerId = runningServer?.peerSessions.getActiveSessions()[0]?.peerId;
+    const firstClosed = closeResult(first.socket);
+
+    await authenticate(url, fixture.agentIdentity, fixture.agentPrivateKey, "egress-agent", nonce(41));
+    await expect(firstClosed).resolves.toEqual([1008, Buffer.from("AGENT_SESSION_REPLACED")]);
+    await waitFor(() => runningServer?.peerSessions.getActiveSessions().length === 1);
+    const replacement = runningServer?.peerSessions.getActiveSessions()[0];
+
+    expect(replacement?.peerId).not.toBe(firstPeerId);
+    expect(replacement?.identity.agentId).toBe("company-agent-1");
+  });
+});

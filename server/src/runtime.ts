@@ -6,6 +6,8 @@ import type { Duplex } from "node:stream";
 import { assertTlsVerificationEnabled } from "@remote-codex/shared";
 import { WebSocketServer, type WebSocket } from "ws";
 
+import { PeerSessionManager, type ServerPeerIdentityRegistration } from "./peer-session.js";
+
 export const HEALTH_CHECK_PATH = "/health" as const;
 export const TUNNEL_WEBSOCKET_PATH = "/tunnel" as const;
 
@@ -39,15 +41,22 @@ export const DEFAULT_SERVER_TRANSPORT_LIMITS: ServerTransportLimits = Object.fre
   maxMessageBytes: 32 * 1024
 });
 
+export const DEFAULT_PEER_HEARTBEAT_TIMEOUT_MS = 45_000;
+
 export interface TunnelServerOptions {
   readonly tls: TlsCredentials;
   readonly allowedOrigins: readonly string[];
   readonly limits?: Partial<ServerTransportLimits>;
+  /** 仅接受由进程内配置注入的公钥身份；不得从连接请求读取凭据。 */
+  readonly peerIdentities?: readonly ServerPeerIdentityRegistration[];
+  readonly authenticationTimeoutMs?: number;
+  readonly heartbeatTimeoutMs?: number;
 }
 
 export interface TunnelServer {
   readonly httpsServer: HttpsServer;
   readonly webSocketServer: WebSocketServer;
+  readonly peerSessions: PeerSessionManager;
   close(): Promise<void>;
 }
 
@@ -268,12 +277,18 @@ export function createTunnelServer(options: TunnelServerOptions): TunnelServer {
     noServer: true,
     perMessageDeflate: false
   });
+  const peerSessions = new PeerSessionManager({
+    heartbeatTimeoutMs: options.heartbeatTimeoutMs ?? DEFAULT_PEER_HEARTBEAT_TIMEOUT_MS,
+    ...(options.peerIdentities === undefined ? {} : { peerIdentities: options.peerIdentities }),
+    ...(options.authenticationTimeoutMs === undefined ? {} : { authenticationTimeoutMs: options.authenticationTimeoutMs })
+  });
   const connectionRates = new Map<string, ConnectionRateRecord>();
   let pendingHandshakes = 0;
 
   webSocketServer.on("connection", (socket: WebSocket) => {
     // ws 会在超大或畸形 frame 时发出 error；消费错误以避免进程异常退出。
     socket.on("error", () => undefined);
+    peerSessions.attach(socket);
   });
 
   httpsServer.on("upgrade", (request, socket, head) => {
@@ -337,7 +352,9 @@ export function createTunnelServer(options: TunnelServerOptions): TunnelServer {
   return Object.freeze({
     httpsServer,
     webSocketServer,
+    peerSessions,
     close: async (): Promise<void> => {
+      peerSessions.close();
       webSocketServer.close();
       await new Promise<void>((resolve, reject) => {
         httpsServer.close((error) => (error === undefined ? resolve() : reject(error)));
