@@ -222,11 +222,9 @@ async function authenticate(
   socket.send(encodeFrame(connectionFrame(FrameType.REGISTER, encodeRegisterPayload(registration))), { binary: true });
   const challengeFrame = await challengePromise;
   expect(challengeFrame.type).toBe(FrameType.CHALLENGE);
-  const challenge = {
-    issuedAtMs: 0,
-    payload: decodeChallengePayload(challengeFrame.payload)
-  };
-  challenge.issuedAtMs = challenge.payload.expiresAtMs - 500;
+  const challengePayload = decodeChallengePayload(challengeFrame.payload);
+  expect(challengePayload.expiresAtMs - challengePayload.issuedAtMs).toBe(500);
+  const challenge = { issuedAtMs: challengePayload.issuedAtMs, payload: challengePayload };
   const response = signAuthenticationChallenge({ identity, signingKey: privateKey, registration, challenge });
   const confirmationPromise = nextFrame(socket);
   socket.send(
@@ -362,9 +360,9 @@ describe("WSS peer registration and session management", () => {
 
     expect(edgeSession).toMatchObject({
       identity: { kind: "edge-device", edgeUserId: "edge-user-1", edgeDeviceId: "edge-device-1" },
-      protocolVersion: 1
+      protocolVersion: 2
     });
-    expect(agentSession).toMatchObject({ identity: { kind: "egress-agent", agentId: "company-agent-1" }, protocolVersion: 1 });
+    expect(agentSession).toMatchObject({ identity: { kind: "egress-agent", agentId: "company-agent-1" }, protocolVersion: 2 });
     expect(edgeSession?.peerId).not.toBe(edge.registration.peerId);
     expect(agentSession?.peerId).not.toBe(agent.registration.peerId);
 
@@ -450,7 +448,8 @@ describe("WSS peer registration and session management", () => {
       { binary: true }
     );
     const challengeFrame = await challengePromise;
-    const challenge = { issuedAtMs: decodeChallengePayload(challengeFrame.payload).expiresAtMs - 500, payload: decodeChallengePayload(challengeFrame.payload) };
+    const challengePayload = decodeChallengePayload(challengeFrame.payload);
+    const challenge = { issuedAtMs: challengePayload.issuedAtMs, payload: challengePayload };
     const response = signAuthenticationChallenge({
       identity: fixture.agentIdentity,
       signingKey: fixture.agentPrivateKey,
@@ -479,7 +478,7 @@ describe("WSS peer registration and session management", () => {
         encodeRegisterPayload({ role: "egress-agent", peerId: fixture.agentIdentity.agentId, nonce: nonce(13) })
       )
     );
-    incompatibleFrame[0] = 2;
+    incompatibleFrame[0] = 1;
     incompatibleSocket.send(incompatibleFrame, { binary: true });
     await expect(incompatibleClose).resolves.toEqual([1002, Buffer.from("PROTOCOL_VIOLATION")]);
     expect(runningServer?.peerSessions.getPendingConnectionCount()).toBe(0);
@@ -508,7 +507,7 @@ describe("WSS peer registration and session management", () => {
       identity: fixture.agentIdentity,
       signingKey: fixture.agentPrivateKey,
       registration,
-      challenge: { issuedAtMs: challengePayload.expiresAtMs - 500, payload: challengePayload }
+      challenge: { issuedAtMs: challengePayload.issuedAtMs, payload: challengePayload }
     });
     const replayClose = closeResult(replaySocket);
     replaySocket.send(
@@ -540,7 +539,7 @@ describe("WSS peer registration and session management", () => {
       identity: fixture.edgeIdentity,
       signingKey: fixture.edgePrivateKey,
       registration,
-      challenge: { issuedAtMs: challengePayload.expiresAtMs - 500, payload: challengePayload }
+      challenge: { issuedAtMs: challengePayload.issuedAtMs, payload: challengePayload }
     });
     const closed = closeResult(socket);
     socket.send(

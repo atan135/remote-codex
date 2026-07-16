@@ -90,7 +90,7 @@ function rejectSocket(url: string, headers: Record<string, string> = {}): Promis
 describe("server package", () => {
   it("exports its stable package name", () => {
     expect(packageName).toBe("@remote-codex/server");
-    expect(sharedProtocolVersion).toBe(1);
+    expect(sharedProtocolVersion).toBe(2);
   });
 });
 

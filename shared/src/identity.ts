@@ -787,6 +787,7 @@ export function issueAuthenticationChallenge(options: AuthenticationChallengeOpt
     issuedAtMs: options.nowMs,
     payload: Object.freeze({
       nonce: validateRandomBytes(options.randomBytes, AUTHENTICATION_CHALLENGE_NONCE_BYTES),
+      issuedAtMs: options.nowMs,
       expiresAtMs
     })
   });

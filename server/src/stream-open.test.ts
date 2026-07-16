@@ -264,7 +264,7 @@ function edgeSession(peerId: string, identity: EdgeDeviceIdentity): Authenticate
       edgeUserId: identity.edgeUserId,
       edgeDeviceId: identity.edgeDeviceId
     }),
-    protocolVersion: 1,
+    protocolVersion: 2,
     establishedAtMs: 1,
     lastHeartbeatAtMs: 1,
     lastHeartbeatSequence: undefined
@@ -280,7 +280,7 @@ function agentSession(peerId: string, identity: EgressAgentIdentity): Authentica
       authenticationKeyId: identity.authenticationKey.keyId,
       agentId: identity.agentId
     }),
-    protocolVersion: 1,
+    protocolVersion: 2,
     establishedAtMs: 1,
     lastHeartbeatAtMs: 1,
     lastHeartbeatSequence: undefined

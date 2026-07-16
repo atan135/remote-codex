@@ -50,7 +50,7 @@ function frameSamples(): readonly ReturnType<typeof connectionFrame | typeof str
     ),
     connectionFrame(
       FrameType.CHALLENGE,
-      encodeChallengePayload({ nonce: nonce(2), expiresAtMs: 1_784_562_400_000 })
+      encodeChallengePayload({ nonce: nonce(2), issuedAtMs: 1_784_562_395_000, expiresAtMs: 1_784_562_400_000 })
     ),
     connectionFrame(
       FrameType.AUTHENTICATE,
@@ -115,12 +115,15 @@ describe("binary tunnel frames", () => {
     const type = Uint8Array.from(encoded);
     const flags = Uint8Array.from(encoded);
     const length = Uint8Array.from(encoded);
+    const legacyVersion = Uint8Array.from(encoded);
     version[0] = PROTOCOL_VERSION + 1;
+    legacyVersion[0] = 1;
     type[1] = 255;
     flags[3] = 1;
     new DataView(length.buffer).setUint32(20, 2);
 
     expectProtocolError(() => decodeFrame(Uint8Array.of(1)), ProtocolErrorCode.FRAME_TRUNCATED);
+    expectProtocolError(() => decodeFrame(legacyVersion), ProtocolErrorCode.VERSION_UNSUPPORTED);
     expectProtocolError(() => decodeFrame(version), ProtocolErrorCode.VERSION_UNSUPPORTED);
     expectProtocolError(() => decodeFrame(type), ProtocolErrorCode.UNKNOWN_FRAME_TYPE);
     expectProtocolError(() => decodeFrame(flags), ProtocolErrorCode.UNSUPPORTED_FLAGS);

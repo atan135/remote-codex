@@ -92,6 +92,8 @@ export interface RegisterPayload {
 
 export interface ChallengePayload {
   readonly nonce: Uint8Array;
+  /** 服务端签发时间也属于认证签名输入，客户端必须从 wire payload 获取。 */
+  readonly issuedAtMs: number;
   readonly expiresAtMs: number;
 }
 
@@ -500,32 +502,45 @@ export function decodeRegisterPayload(payload: Uint8Array): RegisterPayload {
 
 export function encodeChallengePayload(payload: ChallengePayload): Uint8Array {
   validateNonce(payload.nonce);
+  validateTimestampMs(payload.issuedAtMs);
   validateTimestampMs(payload.expiresAtMs);
-  const encoded = new Uint8Array(9 + payload.nonce.byteLength);
+  if (payload.expiresAtMs <= payload.issuedAtMs) {
+    fail(ProtocolErrorCode.MALFORMED_PAYLOAD);
+  }
+
+  const encoded = new Uint8Array(17 + payload.nonce.byteLength);
   const view = new DataView(encoded.buffer);
 
   encoded[0] = payload.nonce.byteLength;
   encoded.set(payload.nonce, 1);
-  view.setBigUint64(1 + payload.nonce.byteLength, BigInt(payload.expiresAtMs));
+  view.setBigUint64(1 + payload.nonce.byteLength, BigInt(payload.issuedAtMs));
+  view.setBigUint64(9 + payload.nonce.byteLength, BigInt(payload.expiresAtMs));
   return encoded;
 }
 
 export function decodeChallengePayload(payload: Uint8Array): ChallengePayload {
   validatePayloadBytes(payload, MAX_CONTROL_PAYLOAD_BYTES);
 
-  if (payload.byteLength < 9) {
+  if (payload.byteLength < 17) {
     fail(ProtocolErrorCode.MALFORMED_PAYLOAD);
   }
 
   const nonceLength = payload[0] ?? 0;
 
-  if (payload.byteLength !== 9 + nonceLength) {
+  if (payload.byteLength !== 17 + nonceLength) {
     fail(ProtocolErrorCode.MALFORMED_PAYLOAD);
   }
 
   const nonce = payload.subarray(1, 1 + nonceLength);
   validateNonce(nonce);
-  return { nonce: Uint8Array.from(nonce), expiresAtMs: readTimestampMs(payload, 1 + nonceLength) };
+  const issuedAtMs = readTimestampMs(payload, 1 + nonceLength);
+  const expiresAtMs = readTimestampMs(payload, 9 + nonceLength);
+
+  if (expiresAtMs <= issuedAtMs) {
+    fail(ProtocolErrorCode.MALFORMED_PAYLOAD);
+  }
+
+  return { nonce: Uint8Array.from(nonce), issuedAtMs, expiresAtMs };
 }
 
 export function encodeAuthenticatePayload(payload: AuthenticatePayload): Uint8Array {

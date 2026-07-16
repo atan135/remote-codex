@@ -1,4 +1,5 @@
-export const PROTOCOL_VERSION = 1 as const;
+/** v2 将认证 challenge 的 issuedAtMs 纳入 wire payload，避免 client 猜测认证窗口。 */
+export const PROTOCOL_VERSION = 2 as const;
 
 export interface AllowedDestination {
   readonly hostname: string;
