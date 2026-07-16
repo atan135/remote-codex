@@ -4,12 +4,17 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@remote-codex/shared": "workspace:*"
+    "@remote-codex/shared": "workspace:*",
+    "ws": "8.18.3"
   },
   "scripts": {
     "lint": "eslint src --max-warnings=0",
     "typecheck": "tsc --project tsconfig.json --noEmit",
     "test": "vitest run --coverage",
     "build": "tsc --project tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/ws": "8.5.14",
+    "selfsigned": "2.4.1"
   }
 }
