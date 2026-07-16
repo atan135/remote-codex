@@ -18,6 +18,8 @@ import {
   type AuthorizationRevocationListener
 } from "./authorization-registry.js";
 import { StreamOpenCoordinator } from "./stream-open.js";
+import type { StreamAuditLogger, StreamMetricsSnapshot } from "./observability.js";
+import type { StreamQuotaLimits } from "./stream-open.js";
 
 export const HEALTH_CHECK_PATH = "/health" as const;
 export const TUNNEL_WEBSOCKET_PATH = "/tunnel" as const;
@@ -60,6 +62,10 @@ export interface ServerStreamAuthorizationOptions {
   readonly allowedDestination: AllowedDestination;
   readonly resourceLimits?: ResourceLimits;
   readonly capabilityTtlMs?: number;
+  /** user/device/agent/global 四维 stream 资源与开流频率限制。 */
+  readonly quotaLimits?: StreamQuotaLimits;
+  /** 仅接收白名单序列化审计记录的日志适配器。 */
+  readonly auditLogger?: StreamAuditLogger;
   readonly now?: () => number;
 }
 
@@ -85,6 +91,8 @@ export interface TunnelServer {
   readonly peerSessions: PeerSessionManager;
   readonly authorizationRegistry: AuthorizationRegistry;
   readonly streamOpenCoordinator?: StreamOpenCoordinator;
+  /** 受控进程内指标快照，不新增 HTTP 端点或泄露 stream 内容。 */
+  readonly getMetrics?: () => StreamMetricsSnapshot;
   close(): Promise<void>;
 }
 
@@ -414,6 +422,7 @@ export function createTunnelServer(options: TunnelServerOptions): TunnelServer {
     peerSessions,
     authorizationRegistry,
     ...(streamOpenCoordinator === undefined ? {} : { streamOpenCoordinator }),
+    ...(streamOpenCoordinator === undefined ? {} : { getMetrics: () => streamOpenCoordinator.getMetrics() }),
     close: async (): Promise<void> => {
       if (streamExpirationTimer !== undefined) {
         clearInterval(streamExpirationTimer);

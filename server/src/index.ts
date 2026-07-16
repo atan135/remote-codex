@@ -33,8 +33,17 @@ export {
   StreamOpenCoordinator,
   type StreamOpenCoordinatorOptions,
   type StreamOwnership,
-  type StreamPeerSessionGateway
+  type StreamPeerSessionGateway,
+  type StreamQuotaLimits
 } from "./stream-open.js";
+
+export {
+  serializeStreamAuditEvent,
+  type StreamAuditEvent,
+  type StreamAuditEventKind,
+  type StreamAuditLogger,
+  type StreamMetricsSnapshot
+} from "./observability.js";
 
 export {
   AuthorizationRegistry,

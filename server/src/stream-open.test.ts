@@ -77,6 +77,10 @@ class FakePeerSessions implements StreamPeerSessionGateway {
     return undefined;
   }
 
+  public getActiveSessions(): readonly AuthenticatedPeerSession[] {
+    return Object.freeze([...this.sessions.values()]);
+  }
+
   public sendFrame(peerId: string, frame: TunnelFrame): boolean {
     if (!this.sessions.has(peerId)) {
       return false;
@@ -1052,6 +1056,212 @@ describe("server stream.open 授权与 capability 签发", () => {
     peers.emit(agentPeer.peerId, credit(second.streamId, 4));
     peers.emit(alicePeer.peerId, streamFrame(FrameType.STREAM_DATA, secondEdgeId, new Uint8Array(4)));
     expect(coordinator.getActiveStreams()[0]).toMatchObject({ bufferedBytes: 4, edgeStreamId: secondEdgeId });
+    coordinator.close();
+  });
+
+  it("按 user、device、共享 agent 与全局并发限额拒绝开流，并在断线后清理全部计数", () => {
+    const fixture = createFixture();
+    const charlie = createEdgeIdentity("edge-user-charlie", "edge-device-charlie");
+    const peers = new FakePeerSessions();
+    const alicePeer = edgeSession("edge-peer-alice", fixture.alice);
+    const bobPeer = edgeSession("edge-peer-bob", fixture.bob);
+    const charliePeer = edgeSession("edge-peer-charlie", charlie);
+    const agentPeer = agentSession("agent-peer-shared", fixture.sharedAgent);
+    peers.connect(alicePeer);
+    peers.connect(bobPeer);
+    peers.connect(charliePeer);
+    peers.connect(agentPeer);
+    const registry = new AuthorizationRegistry({
+      peerIdentities: [...fixture.peerIdentities, { identity: charlie }],
+      document: {
+        auditVersion: 1,
+        authorizations: [
+          registration(fixture.alice, fixture.sharedAgent, 4),
+          registration(fixture.bob, fixture.sharedAgent, 4),
+          registration(charlie, fixture.sharedAgent, 4)
+        ]
+      }
+    });
+    const coordinator = new StreamOpenCoordinator({
+      peerSessions: peers,
+      authorizationRegistry: registry,
+      signingCredentials: fixture.signingCredentials,
+      allowedDestination: DEFAULT_ALLOWED_DESTINATION,
+      quotaLimits: {
+        maxConcurrentStreamsPerUser: 1,
+        maxConcurrentStreamsPerDevice: 1,
+        maxConcurrentStreamsPerAgent: 2,
+        maxConcurrentStreamsGlobal: 2,
+        maxBufferedBytesPerUser: 4,
+        maxBufferedBytesPerDevice: 4,
+        maxBufferedBytesPerAgent: 4,
+        maxBufferedBytesGlobal: 4,
+        maxOpenAttemptsPerWindow: 16,
+        openRateWindowMs: 1_000
+      }
+    });
+
+    peers.emit(alicePeer.peerId, edgeOpen(streamId(1)));
+    peers.emit(alicePeer.peerId, edgeOpen(streamId(17)));
+    peers.emit(bobPeer.peerId, edgeOpen(streamId(33)));
+    peers.emit(charliePeer.peerId, edgeOpen(streamId(49)));
+
+    expect(coordinator.getActiveStreams()).toHaveLength(2);
+    expect(errorCode(peers.framesFor(alicePeer.peerId, FrameType.STREAM_REJECTED).at(-1)!)).toBe(
+      TunnelErrorCode.STREAM_LIMIT_EXCEEDED
+    );
+    expect(errorCode(peers.framesFor(charliePeer.peerId, FrameType.STREAM_REJECTED).at(-1)!)).toBe(
+      TunnelErrorCode.STREAM_LIMIT_EXCEEDED
+    );
+    expect(coordinator.getMetrics()).toMatchObject({
+      authenticatedEdgePeers: 3,
+      authenticatedAgentPeers: 1,
+      activeStreamsByAgent: { [fixture.sharedAgent.agentId]: 2 },
+      rejectedStreamsByEdgeUser: {
+        [fixture.alice.edgeUserId]: 1,
+        [charlie.edgeUserId]: 1
+      }
+    });
+
+    const aliceOwnership = coordinator.getActiveStreams().find((stream) => stream.edgePeerId === alicePeer.peerId)!;
+    const bobOwnership = coordinator.getActiveStreams().find((stream) => stream.edgePeerId === bobPeer.peerId)!;
+    peers.emit(agentPeer.peerId, streamFrame(FrameType.STREAM_OPENED, aliceOwnership.streamId, new Uint8Array()));
+    peers.emit(agentPeer.peerId, streamFrame(FrameType.STREAM_OPENED, bobOwnership.streamId, new Uint8Array()));
+    peers.emit(agentPeer.peerId, credit(aliceOwnership.streamId, 4));
+    peers.emit(agentPeer.peerId, credit(bobOwnership.streamId, 4));
+    peers.emit(alicePeer.peerId, streamFrame(FrameType.STREAM_DATA, streamId(1), new Uint8Array(4)));
+    peers.emit(bobPeer.peerId, streamFrame(FrameType.STREAM_DATA, streamId(33), Uint8Array.of(1)));
+    expect(coordinator.getMetrics().bufferWatermark).toMatchObject({ currentBytes: 4, peakBytes: 4, limitBytes: 4 });
+    expect(coordinator.getActiveStreams()).toHaveLength(1);
+
+    peers.disconnect(alicePeer.peerId);
+    expect(coordinator.getActiveStreams()).toHaveLength(0);
+    expect(coordinator.getMetrics().bufferWatermark.currentBytes).toBe(0);
+    expect(coordinator.getMetrics().activeStreamsByAgent).toEqual({});
+    coordinator.close();
+  });
+
+  it("在 user/device、共享 agent 与全局开流频率窗口内拒绝，并在窗口到期后恢复", () => {
+    const fixture = createFixture();
+    const charlie = createEdgeIdentity("edge-user-charlie", "edge-device-charlie");
+    const peers = new FakePeerSessions();
+    const alicePeer = edgeSession("edge-peer-alice", fixture.alice);
+    const bobPeer = edgeSession("edge-peer-bob", fixture.bob);
+    const charliePeer = edgeSession("edge-peer-charlie", charlie);
+    const sharedAgentPeer = agentSession("agent-peer-shared", fixture.sharedAgent);
+    const otherAgentPeer = agentSession("agent-peer-other", fixture.otherAgent);
+    peers.connect(alicePeer);
+    peers.connect(bobPeer);
+    peers.connect(charliePeer);
+    peers.connect(sharedAgentPeer);
+    peers.connect(otherAgentPeer);
+    const registry = new AuthorizationRegistry({
+      peerIdentities: [...fixture.peerIdentities, { identity: charlie }],
+      document: {
+        auditVersion: 1,
+        authorizations: [
+          registration(fixture.alice, fixture.sharedAgent, 4),
+          registration(fixture.bob, fixture.sharedAgent, 4),
+          registration(charlie, fixture.otherAgent, 4)
+        ]
+      }
+    });
+    let nowMs = 1_000;
+    const coordinator = new StreamOpenCoordinator({
+      peerSessions: peers,
+      authorizationRegistry: registry,
+      signingCredentials: fixture.signingCredentials,
+      allowedDestination: DEFAULT_ALLOWED_DESTINATION,
+      quotaLimits: { maxOpenAttemptsPerWindow: 1, openRateWindowMs: 100 },
+      now: () => nowMs
+    });
+
+    const firstAliceId = streamId(1);
+    peers.emit(alicePeer.peerId, edgeOpen(firstAliceId));
+    peers.emit(
+      alicePeer.peerId,
+      streamFrame(FrameType.STREAM_CLOSE, firstAliceId, encodeStreamClosePayload({ code: StreamCloseCode.NORMAL }))
+    );
+    expect(coordinator.getActiveStreams()).toHaveLength(0);
+
+    // 同一 user/device 的第二次开流命中其自身频率窗口。
+    peers.emit(alicePeer.peerId, edgeOpen(streamId(17)));
+    // Bob 是独立 user/device；其拒绝不能由 Alice 的 user/device 限额造成，必须保留 shared-agent/global 限制。
+    peers.emit(bobPeer.peerId, edgeOpen(streamId(33)));
+    // Charlie 使用另一 agent，证明全局频率限制没有被 user 或 shared-agent 测试掩盖。
+    peers.emit(charliePeer.peerId, edgeOpen(streamId(49)));
+
+    expect(errorCode(peers.framesFor(alicePeer.peerId, FrameType.STREAM_REJECTED).at(-1)!)).toBe(
+      TunnelErrorCode.STREAM_LIMIT_EXCEEDED
+    );
+    expect(errorCode(peers.framesFor(bobPeer.peerId, FrameType.STREAM_REJECTED).at(-1)!)).toBe(
+      TunnelErrorCode.STREAM_LIMIT_EXCEEDED
+    );
+    expect(errorCode(peers.framesFor(charliePeer.peerId, FrameType.STREAM_REJECTED).at(-1)!)).toBe(
+      TunnelErrorCode.STREAM_LIMIT_EXCEEDED
+    );
+    expect(peers.framesFor(sharedAgentPeer.peerId, FrameType.STREAM_OPEN)).toHaveLength(1);
+    expect(peers.framesFor(otherAgentPeer.peerId, FrameType.STREAM_OPEN)).toHaveLength(0);
+
+    nowMs = 1_100;
+    coordinator.expireOpenStreams();
+    peers.emit(charliePeer.peerId, edgeOpen(streamId(65)));
+    expect(coordinator.getActiveStreams()).toHaveLength(1);
+    expect(coordinator.getActiveStreams()[0]).toMatchObject({
+      edgeUserId: charlie.edgeUserId,
+      agentId: fixture.otherAgent.agentId
+    });
+    expect(peers.framesFor(otherAgentPeer.peerId, FrameType.STREAM_OPEN)).toHaveLength(1);
+    coordinator.close();
+  });
+
+  it("频率窗口、异常帧与断线反复清理后不残留 stream 映射、缓冲或审计 payload", () => {
+    const fixture = createFixture();
+    const peers = new FakePeerSessions();
+    const alicePeer = edgeSession("edge-peer-alice", fixture.alice);
+    const agentPeer = agentSession("agent-peer-shared", fixture.sharedAgent);
+    peers.connect(alicePeer);
+    peers.connect(agentPeer);
+    let nowMs = 1_000;
+    const auditLogs: string[] = [];
+    const coordinator = new StreamOpenCoordinator({
+      peerSessions: peers,
+      authorizationRegistry: createRegistry(fixture),
+      signingCredentials: fixture.signingCredentials,
+      allowedDestination: DEFAULT_ALLOWED_DESTINATION,
+      quotaLimits: { maxOpenAttemptsPerWindow: 32, openRateWindowMs: 100 },
+      auditLogger: (event) => auditLogs.push(event),
+      now: () => nowMs
+    });
+
+    for (let index = 0; index < 12; index += 1) {
+      const edgeId = streamId(index * 16 + 1);
+      peers.emit(alicePeer.peerId, edgeOpen(edgeId));
+      const ownership = coordinator.getActiveStreams()[0]!;
+      peers.emit(agentPeer.peerId, streamFrame(FrameType.STREAM_OPENED, ownership.streamId, new Uint8Array()));
+      peers.emit(agentPeer.peerId, credit(ownership.streamId, 64 * 1024));
+      peers.emit(alicePeer.peerId, streamFrame(FrameType.STREAM_DATA, edgeId, Uint8Array.of(1, 2, 3, 4)));
+      peers.emit(
+        agentPeer.peerId,
+        {
+          type: FrameType.STREAM_CREDIT,
+          flags: 0,
+          streamId: ownership.streamId,
+          payload: Uint8Array.of(1)
+        } as unknown as TunnelFrame
+      );
+
+      expect(coordinator.getActiveStreams()).toHaveLength(0);
+      expect(coordinator.getMetrics().bufferWatermark.currentBytes).toBe(0);
+      nowMs += 1;
+    }
+
+    expect(coordinator.getMetrics()).toMatchObject({
+      activeStreamsByAgent: {},
+      closedStreamsByReason: { [TunnelErrorCode.PROTOCOL_VIOLATION]: 12 }
+    });
+    expect(auditLogs).toHaveLength(36);
+    expect(auditLogs.every((event) => !event.includes("payload") && !event.includes("capability"))).toBe(true);
     coordinator.close();
   });
 });
