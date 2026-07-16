@@ -115,6 +115,30 @@ describe("受限 HTTPS/WSS 入口", () => {
     ).rejects.toMatchObject({ code: "SERVER_TLS_CREDENTIALS_LOAD_FAILED" } satisfies Partial<ServerStartupError>);
   });
 
+  it("启动时严格加载授权文件并拒绝未知 peer 身份", () => {
+    expect(() =>
+      createTunnelServer({
+        tls: testTlsCredentials,
+        allowedOrigins: [TEST_ORIGIN],
+        peerIdentities: [],
+        authorizationDocument: {
+          auditVersion: 1,
+          authorizations: [
+            {
+              edgeUserId: "edge-user-unregistered",
+              edgeDeviceId: "edge-device-unregistered",
+              agentId: "agent-unregistered",
+              status: "active",
+              quota: { maxConcurrentStreams: 1, maxBufferedBytes: 1024 },
+              createdAtMs: 0,
+              auditVersion: 1
+            }
+          ]
+        }
+      })
+    ).toThrow("SERVER_AUTHORIZATION_EDGE_DEVICE_UNKNOWN");
+  });
+
   it("仅在独立健康检查端点返回固定状态", async () => {
     const baseUrl = await startServer();
     const result = await new Promise<{ readonly body: string; readonly statusCode: number | undefined }>(

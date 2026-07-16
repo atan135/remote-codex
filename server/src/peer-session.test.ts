@@ -82,32 +82,32 @@ function nonce(seed: number): Uint8Array {
   return Uint8Array.from({ length: 32 }, (_, index) => (seed + index) % 256);
 }
 
-function createFixture(): AuthenticationFixture {
+function createFixture(suffix = 1): AuthenticationFixture {
   const edgeKeys = generateKeyPairSync("ed25519");
   const agentKeys = generateKeyPairSync("ed25519");
   const edgePrivateKey = createIdentityPrivateKey(
-    { role: IdentityKeyRole.EDGE_DEVICE_AUTHENTICATION, keyId: "edge-key-1" },
+    { role: IdentityKeyRole.EDGE_DEVICE_AUTHENTICATION, keyId: `edge-key-${suffix}` },
     edgeKeys.privateKey
   );
   const agentPrivateKey = createIdentityPrivateKey(
-    { role: IdentityKeyRole.EGRESS_AGENT_AUTHENTICATION, keyId: "agent-key-1" },
+    { role: IdentityKeyRole.EGRESS_AGENT_AUTHENTICATION, keyId: `agent-key-${suffix}` },
     agentKeys.privateKey
   );
 
   return {
     edgeIdentity: createEdgeDeviceIdentity({
-      edgeUserId: "edge-user-1",
-      edgeDeviceId: "edge-device-1",
+      edgeUserId: `edge-user-${suffix}`,
+      edgeDeviceId: `edge-device-${suffix}`,
       authenticationKey: createIdentityPublicKey(
-        { role: IdentityKeyRole.EDGE_DEVICE_AUTHENTICATION, keyId: "edge-key-1" },
+        { role: IdentityKeyRole.EDGE_DEVICE_AUTHENTICATION, keyId: `edge-key-${suffix}` },
         edgeKeys.publicKey
       )
     }),
     edgePrivateKey,
     agentIdentity: createEgressAgentIdentity({
-      agentId: "company-agent-1",
+      agentId: `company-agent-${suffix}`,
       authenticationKey: createIdentityPublicKey(
-        { role: IdentityKeyRole.EGRESS_AGENT_AUTHENTICATION, keyId: "agent-key-1" },
+        { role: IdentityKeyRole.EGRESS_AGENT_AUTHENTICATION, keyId: `agent-key-${suffix}` },
         agentKeys.publicKey
       )
     }),
@@ -117,7 +117,9 @@ function createFixture(): AuthenticationFixture {
 
 async function startServer(
   peerIdentities: readonly ServerPeerIdentityRegistration[],
-  overrides: Partial<Pick<Parameters<typeof createTunnelServer>[0], "heartbeatTimeoutMs" | "authenticationTimeoutMs">> = {}
+  overrides: Partial<
+    Pick<Parameters<typeof createTunnelServer>[0], "heartbeatTimeoutMs" | "authenticationTimeoutMs" | "authorizationDocument">
+  > = {}
 ): Promise<string> {
   runningServer = createTunnelServer({
     tls: testTlsCredentials,
@@ -216,6 +218,55 @@ async function authenticate(
 }
 
 describe("WSS peer registration and session management", () => {
+  it("maps two authenticated edge users to one explicitly shared agent", async () => {
+    const firstFixture = createFixture();
+    const secondFixture = createFixture(2);
+    const url = await startServer(
+      [
+        { identity: firstFixture.edgeIdentity },
+        { identity: secondFixture.edgeIdentity },
+        { identity: firstFixture.agentIdentity }
+      ],
+      {
+        authorizationDocument: {
+          auditVersion: 1,
+          authorizations: [
+            {
+              edgeUserId: firstFixture.edgeIdentity.edgeUserId,
+              edgeDeviceId: firstFixture.edgeIdentity.edgeDeviceId,
+              agentId: firstFixture.agentIdentity.agentId,
+              status: "active",
+              quota: { maxConcurrentStreams: 2, maxBufferedBytes: 16 * 1024 },
+              createdAtMs: 0,
+              auditVersion: 1
+            },
+            {
+              edgeUserId: secondFixture.edgeIdentity.edgeUserId,
+              edgeDeviceId: secondFixture.edgeIdentity.edgeDeviceId,
+              agentId: firstFixture.agentIdentity.agentId,
+              status: "active",
+              quota: { maxConcurrentStreams: 2, maxBufferedBytes: 16 * 1024 },
+              createdAtMs: 0,
+              auditVersion: 1
+            }
+          ]
+        }
+      }
+    );
+    await authenticate(url, firstFixture.edgeIdentity, firstFixture.edgePrivateKey, "edge-client", nonce(1));
+    await authenticate(url, secondFixture.edgeIdentity, secondFixture.edgePrivateKey, "edge-client", nonce(2));
+    await authenticate(url, firstFixture.agentIdentity, firstFixture.agentPrivateKey, "egress-agent", nonce(3));
+    await waitFor(() => runningServer?.peerSessions.getActiveSessions().length === 3);
+
+    const edgeSessions = (runningServer?.peerSessions.getActiveSessions() ?? []).filter(
+      (session) => session.identity.kind === "edge-device"
+    );
+    expect(edgeSessions).toHaveLength(2);
+    expect(
+      edgeSessions.map((session) => runningServer?.authorizationRegistry.resolveAgentForEdge(session.identity)?.agentId)
+    ).toEqual([firstFixture.agentIdentity.agentId, firstFixture.agentIdentity.agentId]);
+  });
+
   it("authenticates independently registered edge and agent peers and retains metadata only", async () => {
     const fixture = createFixture();
     const url = await startServer([{ identity: fixture.edgeIdentity }, { identity: fixture.agentIdentity }]);

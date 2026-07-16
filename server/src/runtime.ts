@@ -7,6 +7,11 @@ import { assertTlsVerificationEnabled } from "@remote-codex/shared";
 import { WebSocketServer, type WebSocket } from "ws";
 
 import { PeerSessionManager, type ServerPeerIdentityRegistration } from "./peer-session.js";
+import {
+  AuthorizationRegistry,
+  type AuthorizationRegistryDocument,
+  type AuthorizationRevocationListener
+} from "./authorization-registry.js";
 
 export const HEALTH_CHECK_PATH = "/health" as const;
 export const TUNNEL_WEBSOCKET_PATH = "/tunnel" as const;
@@ -51,12 +56,17 @@ export interface TunnelServerOptions {
   readonly peerIdentities?: readonly ServerPeerIdentityRegistration[];
   readonly authenticationTimeoutMs?: number;
   readonly heartbeatTimeoutMs?: number;
+  /** 启动时严格校验的 edge user/device-to-agent 授权文件。 */
+  readonly authorizationDocument?: AuthorizationRegistryDocument;
+  /** 授权撤销后由后续 stream 层订阅并关闭受影响存量流。 */
+  readonly onAuthorizationRevocation?: AuthorizationRevocationListener;
 }
 
 export interface TunnelServer {
   readonly httpsServer: HttpsServer;
   readonly webSocketServer: WebSocketServer;
   readonly peerSessions: PeerSessionManager;
+  readonly authorizationRegistry: AuthorizationRegistry;
   close(): Promise<void>;
 }
 
@@ -282,6 +292,13 @@ export function createTunnelServer(options: TunnelServerOptions): TunnelServer {
     ...(options.peerIdentities === undefined ? {} : { peerIdentities: options.peerIdentities }),
     ...(options.authenticationTimeoutMs === undefined ? {} : { authenticationTimeoutMs: options.authenticationTimeoutMs })
   });
+  const authorizationRegistry = new AuthorizationRegistry({
+    peerIdentities: options.peerIdentities ?? [],
+    ...(options.authorizationDocument === undefined ? {} : { document: options.authorizationDocument }),
+    ...(options.onAuthorizationRevocation === undefined
+      ? {}
+      : { onRevocation: options.onAuthorizationRevocation })
+  });
   const connectionRates = new Map<string, ConnectionRateRecord>();
   let pendingHandshakes = 0;
 
@@ -353,6 +370,7 @@ export function createTunnelServer(options: TunnelServerOptions): TunnelServer {
     httpsServer,
     webSocketServer,
     peerSessions,
+    authorizationRegistry,
     close: async (): Promise<void> => {
       peerSessions.close();
       webSocketServer.close();

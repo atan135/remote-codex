@@ -25,5 +25,21 @@ export {
   type ServerPeerIdentityRegistration
 } from "./peer-session.js";
 
+export {
+  AuthorizationRegistry,
+  AuthorizationRegistryError,
+  AuthorizationStatus,
+  parseAuthorizationRegistryJson,
+  type AuthorizedAgentRoute,
+  type AuthorizationQuota,
+  type AuthorizationRegistration,
+  type AuthorizationRegistryDocument,
+  type AuthorizationRegistryOptions,
+  type AuthorizationRegistryUpdateResult,
+  type AuthorizationRevocation,
+  type AuthorizationRevocationListener,
+  type AuthorizationStatus as AuthorizationStatusType
+} from "./authorization-registry.js";
+
 export const packageName = "@remote-codex/server" as const;
 export const sharedProtocolVersion: ServerConfig["protocolVersion"] = PROTOCOL_VERSION;
