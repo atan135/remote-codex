@@ -30,19 +30,35 @@ edge 机器上的 Codex CLI
 server 授权注册表中的 active `(edgeUserId, edgeDeviceId) -> agentId` 记录；每条 stream
 仍单独认证、授权、限额和清理。
 
+生产进程由 `server-host`、`egress-agent-host`、`edge-client-host` 分别组合运行库与受保护配置。
+`ops` 只执行离线身份、授权、bundle 和 release 操作。Public Server 的 TLS/WSS 是唯一公开入口；
+Agent 没有入站面；Edge 只有 `127.0.0.1:<8000-9000>` CONNECT listener。Public Server 和两端
+WSS 使用显式 `8000-9000` 端口，模型网关仍只允许精确 hostname 的出站 `443`。
+
+## 协议与身份
+
+当前 `protocolVersion` 为 `2`。每条 WebSocket message 是一帧小型二进制 envelope：首部包含版本、
+类型、flags、128 位 stream ID 和 payload 长度；连接帧使用全零 stream ID，数据帧使用非零 ID。
+不同版本、未知类型/flags、超长或格式错误帧会直接拒绝，没有协议降级协商。
+
+Edge device 与 Egress Agent 各自用独立 Ed25519 身份响应 Server challenge。Server 认证 peer 后按
+active user/device -> agent ACL 授权每条 stream，再用独立 signing key 签发短期、一次消费且精确
+绑定 user、device、agent、stream ID、hostname:443 的 capability。Agent 在 TCP 拨号前验证签名、
+有效期、绑定与本地 allowlist，因而 Server 端验证不是最终执行点。
+
 ## 启动前置条件
 
 本仓库提供运行时库、不建立网络连接的离线运维 CLI，以及 server、agent、edge 的受控生产
 启动器。各 host 只加载所属配置和独立受保护身份材料；Windows agent/edge 使用当前普通用户的
-登录任务。运行时按下列顺序管理：
+登录任务。生产按下列顺序管理：
 
-1. 创建并运行 server，登记 edge 设备、egress agent 的公钥身份以及授权注册表。
-2. 用 `EgressAgentRuntime` 启动 agent，等待其完成 WSS 认证并在线。
-3. 用 `EdgeClientRuntime` 启动 edge runtime，等待其状态为 `online`。
-4. 以该 runtime 作为 `LoopbackConnectProxy` 的 `streamGateway` 创建本地代理，并调用
-   `start()`。`LoopbackConnectProxy` 固定监听 `127.0.0.1`；生产端口应取
-   `EdgeClientConfig.listenPort`。
-5. 仅在 edge runtime 在线且本地代理已成功监听后，才让 Codex 使用 `HTTPS_PROXY`。
+1. 启动 `server-host`，登记 edge device、Egress Agent 公钥身份和授权注册表。
+2. 启动 `egress-agent-host`，等待其完成 WSS 认证并在线。
+3. 启动 `edge-client-host`。host 先创建固定 `127.0.0.1` 的受限 CONNECT listener，再启动 Edge
+   WSS runtime；离线、认证中或重连期间的 CONNECT 只返回固定失败，不排队、不直连模型网关，
+   也不放宽或改选 Agent。
+4. 状态脚本确认 Edge WSS 在线、唯一 loopback listener 存在且没有额外连接后，才让 Codex 当前
+   shell 使用 `HTTPS_PROXY`。
 
 公开入口包括 `loadEdgeClientConfig`、`EdgeClientRuntime`、`LoopbackConnectProxy`、
 `loadEgressAgentConfig`、`EgressAgentRuntime` 和 `EgressAgentDialer`。认证私钥通过这些
@@ -62,6 +78,8 @@ Public Server 使用直接 TLS，唯一公开 WSS URL 为
 
 Windows Edge Client 的独立设备材料、最低权限登录任务、会话级 `HTTPS_PROXY`、loopback 手工
 验收和安全错误收集见 [Windows Edge Client 用户接入](docs/operations/windows-edge-client-deployment.md)。
+所有运维入口见[运维文档索引](docs/operations/README.md)；版本化 production allowlist、逐文件
+SHA-256 inventory、升级顺序和安全回滚见[发布、升级与回滚](docs/operations/release-and-rollback.md)。
 
 ## Codex 接入
 
@@ -103,11 +121,20 @@ TLS 应用内容从 Codex 到已批准模型网关端到端保持不透明。ser
 ```powershell
 corepack pnpm lint
 corepack pnpm typecheck
-corepack pnpm test
+corepack pnpm test:without-e2e
 corepack pnpm build
 ```
+
+也可运行 `corepack pnpm verify:repository-without-e2e` 执行以上四项。该入口明确排除
+`server/src/end-to-end.test.ts`，只适用于真实联调暂缓时的仓库验证，不能归档为完整 E2E 或发布
+验收。完整 `corepack pnpm test`、真实 WSS/公司网关路径、非 loopback 负向访问以及预生产发布与
+回滚必须由部署负责人在隔离环境手工完成。
 
 网络验收还必须确认：请求只到达已批准网关；不同 hostname、IP literal 和非 `443` 端口在
 egress-agent 的最终验证处失败；非 loopback 无法访问 edge 代理；WSS 断开会关闭旧 stream
 并仅在重新认证后允许新流；日志不含 payload 或凭据。协议与资源契约见
 [共享契约](docs/shared-contract.md)，详细信任边界见[架构文档](docs/architecture.md)。
+
+自动测试已覆盖协议版本拒绝、认证/capability、目标验证、授权、stream 清理、背压、重连状态机、
+loopback 配置、host bundle、安全日志与 release fail-closed 规则；它不证明实际 DNS/TLS、公司出口、
+网关侧来源、主机防火墙、任务计划/systemd 状态或真实 Codex 请求已验收。

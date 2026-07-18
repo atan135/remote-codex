@@ -7,6 +7,16 @@ export {
 } from "./authorization-files.js";
 export { generateIdentityFiles, type GeneratedIdentityFiles } from "./identity-files.js";
 export {
+  createReleaseInventory,
+  parseReleasePolicyJson,
+  RELEASE_INVENTORY_SCHEMA_VERSION,
+  RELEASE_POLICY_SCHEMA_VERSION,
+  stageReleaseCandidate,
+  validateReleaseInventory,
+  type ReleasePolicy,
+  type ReleaseVerificationResult
+} from "./release.js";
+export {
   parseServerHostConfigJson,
   SERVER_HOST_CONFIG_SCHEMA_VERSION,
   type ServerHostConfig

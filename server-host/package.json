@@ -25,6 +25,7 @@
     "typecheck": "tsc --project tsconfig.json --noEmit",
     "pretest": "corepack pnpm --filter @remote-codex/shared build && corepack pnpm --filter @remote-codex/server build && corepack pnpm --filter @remote-codex/ops build",
     "test": "vitest run --coverage",
+    "test:without-e2e": "vitest run --coverage",
     "build": "tsc --project tsconfig.json"
   }
 }

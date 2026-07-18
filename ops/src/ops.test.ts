@@ -100,7 +100,31 @@ function cliDependencies(): CliDependencies {
       auditVersion: 4,
       archivedVersions: Object.freeze([1, 2, 3, 4])
     })) as CliDependencies["verifyAuthorizationAuditTrail"],
-    changeAuthorizationFile: (() => ({ auditVersion: 5, authorizations: [] }) as never) as CliDependencies["changeAuthorizationFile"]
+    changeAuthorizationFile: (() => ({ auditVersion: 5, authorizations: [] }) as never) as CliDependencies["changeAuthorizationFile"],
+    createReleaseInventory: (() => Object.freeze({
+      ok: true,
+      releaseVersion: "0.1.0",
+      protocolVersion: 2,
+      fileCount: 120,
+      byteCount: 1024,
+      aggregateSha256: "a".repeat(64)
+    })) as CliDependencies["createReleaseInventory"],
+    stageReleaseCandidate: (() => Object.freeze({
+      ok: true,
+      releaseVersion: "0.1.0",
+      protocolVersion: 2,
+      fileCount: 120,
+      byteCount: 1024,
+      aggregateSha256: "a".repeat(64)
+    })) as CliDependencies["stageReleaseCandidate"],
+    validateReleaseInventory: (() => Object.freeze({
+      ok: true,
+      releaseVersion: "0.1.0",
+      protocolVersion: 2,
+      fileCount: 120,
+      byteCount: 1024,
+      aggregateSha256: "a".repeat(64)
+    })) as CliDependencies["validateReleaseInventory"]
   };
 }
 
@@ -110,6 +134,10 @@ describe("离线 CLI", () => {
     expect(runCli([
       "deployment", "validate", "--root", "deployment-root", "--manifest", "manifest.json"
     ], dependencies)).toEqual({ ok: true, component: "edge-client" });
+
+    expect(runCli([
+      "release", "validate", "--root", "release-root", "--policy", "policy.json", "--inventory", "inventory.json"
+    ], dependencies)).toMatchObject({ ok: true, releaseVersion: "0.1.0", protocolVersion: 2, fileCount: 120 });
 
     const identity = runCli([
       "identity", "generate",

@@ -4,6 +4,7 @@ import { changeAuthorizationFile, verifyAuthorizationAuditTrail, type Authorizat
 import { fail } from "./errors.js";
 import { generateIdentityFiles } from "./identity-files.js";
 import { loadProductionBundle } from "./production-loader.js";
+import { createReleaseInventory, stageReleaseCandidate, validateReleaseInventory } from "./release.js";
 
 type Arguments = ReadonlyMap<string, string>;
 
@@ -12,13 +13,19 @@ export interface CliDependencies {
   readonly generateIdentityFiles: typeof generateIdentityFiles;
   readonly verifyAuthorizationAuditTrail: typeof verifyAuthorizationAuditTrail;
   readonly changeAuthorizationFile: typeof changeAuthorizationFile;
+  readonly createReleaseInventory: typeof createReleaseInventory;
+  readonly stageReleaseCandidate: typeof stageReleaseCandidate;
+  readonly validateReleaseInventory: typeof validateReleaseInventory;
 }
 
 const DEFAULT_DEPENDENCIES: CliDependencies = Object.freeze({
   loadProductionBundle,
   generateIdentityFiles,
   verifyAuthorizationAuditTrail,
-  changeAuthorizationFile
+  changeAuthorizationFile,
+  createReleaseInventory,
+  stageReleaseCandidate,
+  validateReleaseInventory
 });
 
 function parseArguments(values: readonly string[]): Arguments {
@@ -109,6 +116,30 @@ export function runCli(
     exactArguments(arguments_, ["--root", "--manifest"]);
     const bundle = dependencies.loadProductionBundle(value(arguments_, "--root"), value(arguments_, "--manifest"));
     return Object.freeze({ ok: true, component: bundle.component });
+  }
+  if (group === "release" && command === "inventory") {
+    exactArguments(arguments_, ["--root", "--policy", "--output"]);
+    return dependencies.createReleaseInventory(
+      value(arguments_, "--root"),
+      value(arguments_, "--policy"),
+      value(arguments_, "--output")
+    );
+  }
+  if (group === "release" && command === "stage") {
+    exactArguments(arguments_, ["--source", "--policy", "--output"]);
+    return dependencies.stageReleaseCandidate(
+      value(arguments_, "--source"),
+      value(arguments_, "--policy"),
+      value(arguments_, "--output")
+    );
+  }
+  if (group === "release" && command === "validate") {
+    exactArguments(arguments_, ["--root", "--policy", "--inventory"]);
+    return dependencies.validateReleaseInventory(
+      value(arguments_, "--root"),
+      value(arguments_, "--policy"),
+      value(arguments_, "--inventory")
+    );
   }
   if (group === "identity" && command === "generate") {
     exactArguments(arguments_, ["--root", "--output-directory", "--role", "--key-id"]);

@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": 2,
+  "productionManifestSchemaVersion": 2,
+  "serverHostConfigSchemaVersion": 1,
+  "staticFiles": [
+    "README.md",
+    "deployment/linux/server/journald-remote-codex.conf",
+    "deployment/linux/server/remote-codex-server-cert-reload.path",
+    "deployment/linux/server/remote-codex-server-cert-reload.service",
+    "deployment/linux/server/remote-codex-server.service",
+    "deployment/linux/server/validate-public-input.mjs",
+    "deployment/linux/server/verify-public-server.sh",
+    "deployment/release-policy.json",
+    "deployment/windows/edge-client/Install-EdgeClientTask.ps1",
+    "deployment/windows/edge-client/Start-EdgeClientTask.ps1",
+    "deployment/windows/edge-client/Stop-EdgeClientTask.ps1",
+    "deployment/windows/edge-client/Test-EdgeClientStatus.ps1",
+    "deployment/windows/edge-client/Uninstall-EdgeClientTask.ps1",
+    "deployment/windows/egress-agent/Install-EgressAgentTask.ps1",
+    "deployment/windows/egress-agent/Start-EgressAgentTask.ps1",
+    "deployment/windows/egress-agent/Stop-EgressAgentTask.ps1",
+    "deployment/windows/egress-agent/Test-EgressAgentNetwork.ps1",
+    "deployment/windows/egress-agent/Uninstall-EgressAgentTask.ps1",
+    "docs/architecture.md",
+    "docs/configuration-example.md",
+    "docs/operations/README.md",
+    "docs/operations/identity-and-authorization.md",
+    "docs/operations/incident-response.md",
+    "docs/operations/public-server-deployment.md",
+    "docs/operations/release-and-rollback.md",
+    "docs/operations/windows-edge-client-deployment.md",
+    "docs/operations/windows-egress-agent-deployment.md",
+    "docs/shared-contract.md",
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml"
+  ],
+  "workspaces": [
+    {
+      "directory": "edge-client",
+      "packageName": "@remote-codex/edge-client",
+      "role": "runtime",
+      "dependencies": ["@remote-codex/shared", "ws"],
+      "modules": ["connect-proxy", "index", "runtime"]
+    },
+    {
+      "directory": "edge-client-host",
+      "packageName": "@remote-codex/edge-client-host",
+      "role": "production",
+      "dependencies": ["@remote-codex/edge-client", "@remote-codex/ops", "@remote-codex/shared"],
+      "modules": ["cli", "cli-main", "index", "logging", "persistent-log", "runtime"]
+    },
+    {
+      "directory": "egress-agent",
+      "packageName": "@remote-codex/egress-agent",
+      "role": "runtime",
+      "dependencies": ["@remote-codex/shared", "ws"],
+      "modules": ["dialer", "index", "runtime"]
+    },
+    {
+      "directory": "egress-agent-host",
+      "packageName": "@remote-codex/egress-agent-host",
+      "role": "production",
+      "dependencies": ["@remote-codex/egress-agent", "@remote-codex/ops", "@remote-codex/shared"],
+      "modules": ["cli", "cli-main", "index", "logging", "persistent-log", "runtime"]
+    },
+    {
+      "directory": "ops",
+      "packageName": "@remote-codex/ops",
+      "role": "production",
+      "dependencies": ["@remote-codex/server", "@remote-codex/shared"],
+      "modules": ["authorization-files", "cli", "cli-main", "errors", "identity-files", "index", "production-loader", "release", "schema", "secure-files", "server-host"]
+    },
+    {
+      "directory": "server",
+      "packageName": "@remote-codex/server",
+      "role": "runtime",
+      "dependencies": ["@remote-codex/shared", "ws"],
+      "modules": ["authorization-registry", "connection-rate-tracker", "index", "observability", "peer-session", "runtime", "stream-open"]
+    },
+    {
+      "directory": "server-host",
+      "packageName": "@remote-codex/server-host",
+      "role": "production",
+      "dependencies": ["@remote-codex/ops", "@remote-codex/server", "@remote-codex/shared"],
+      "modules": ["bundle-fingerprint", "cli", "cli-main", "index", "logging", "runtime"]
+    },
+    {
+      "directory": "shared",
+      "packageName": "@remote-codex/shared",
+      "role": "runtime",
+      "dependencies": [],
+      "modules": ["config", "destination", "identity", "index", "protocol", "stream"]
+    }
+  ]
+}
