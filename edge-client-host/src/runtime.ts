@@ -68,14 +68,22 @@ export class EdgeClientHostError extends Error {
   }
 }
 
+const SAFE_EDGE_HOST_ERROR_CODES = new Set([
+  "EACCES",
+  "EADDRINUSE",
+  "EDGE_HOST_COMPONENT_MISMATCH",
+  "EDGE_HOST_DESTINATION_INVALID",
+  "EDGE_HOST_LISTENER_INVALID",
+  "EDGE_HOST_NETWORK_POLICY_INVALID",
+  "EDGE_HOST_SERVER_URL_INVALID",
+  "EDGE_HOST_START_FAILED",
+  "EDGE_HOST_TERMINATED_DURING_START",
+  "EDGE_RUNTIME_START_FAILED"
+]);
+
 function safeErrorCode(error: unknown, fallback: string): string {
-  if (
-    error !== null &&
-    typeof error === "object" &&
-    "code" in error &&
-    typeof error.code === "string" &&
-    /^[A-Z][A-Z0-9_]{0,127}$/u.test(error.code)
-  ) {
+  if (error !== null && typeof error === "object" && "code" in error &&
+      typeof error.code === "string" && SAFE_EDGE_HOST_ERROR_CODES.has(error.code)) {
     return error.code;
   }
   return fallback;

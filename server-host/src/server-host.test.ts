@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import type { LoadedProductionBundle, LoadedServerProductionBundle } from "@remote-codex/ops";
 import type { StreamMetricsSnapshot, TunnelServer, TunnelServerOptions } from "@remote-codex/server";
+import { StreamCloseCode, StreamState, TunnelErrorCode } from "@remote-codex/shared";
 import { describe, expect, it, vi } from "vitest";
 
 import { runServerHostCli } from "./cli.js";
@@ -224,6 +225,38 @@ describe("server host", () => {
     expect(result).toBe(1);
     expect(stderr).toEqual([`${JSON.stringify({ ok: false, code: "SERVER_HOST_START_FAILED" })}\n`]);
     expect(stderr.join("")).not.toContain(secret);
+
+    const maliciousCode = "PRIVATE_KEY_TOKEN_SECRET";
+    const maliciousStderr: string[] = [];
+    const maliciousResult = await runServerHostCli(
+      ["--root", "config-root"],
+      { stderr: { write: (value) => { maliciousStderr.push(String(value)); return true; } } },
+      {
+        loadBundle: () => { throw Object.assign(new Error(secret), { code: maliciousCode }); },
+        writeLog: () => undefined
+      }
+    );
+    expect(maliciousResult).toBe(1);
+    expect(maliciousStderr).toEqual([`${JSON.stringify({ ok: false, code: "SERVER_HOST_START_FAILED" })}\n`]);
+    expect(maliciousStderr.join("")).not.toContain(maliciousCode);
+  });
+
+  it("started 日志 writer 故障不遗留 listener 且不干扰 reload 或幂等 shutdown", async () => {
+    const fake = fakeTunnel();
+    const running = await startServerHost("deployment-root", "manifest.json", {
+      loadBundle: () => bundle(),
+      validateTls: () => undefined,
+      createServer: () => fake.tunnel,
+      listen: async () => undefined,
+      writeLog: () => {
+        throw new Error("injected-log-writer-failure");
+      }
+    });
+
+    await expect(running.reloadTls()).resolves.toBe(true);
+    await expect(running.close()).resolves.toBeUndefined();
+    await expect(running.close()).resolves.toBeUndefined();
+    expect(fake.close).toHaveBeenCalledOnce();
   });
 });
 
@@ -233,6 +266,7 @@ describe("进程日志白名单", () => {
     const logger = new SafeServerProcessLogger((line) => lines.push(line), () => 1_000);
     logger.audit(JSON.stringify({
       event: "stream.closed",
+      occurredAtMs: 1_000,
       streamId: "stream-01",
       state: "closed",
       durationMs: 10,
@@ -241,6 +275,12 @@ describe("进程日志白名单", () => {
       cookie: "session=secret",
       privateKey: "secret-key"
     }));
+    logger.lifecycle("server.started", {
+      listenPort: 8_443,
+      listenHost: "0.0.0.0",
+      publicWssUrl: "wss://secret-host.example.test:8443/tunnel",
+      code: "PRIVATE_KEY_TOKEN_SECRET"
+    } as unknown as { readonly code?: string; readonly listenPort?: number });
     logger.metrics({
       authenticatedEdgePeers: 1,
       authenticatedAgentPeers: 1,
@@ -258,6 +298,94 @@ describe("进程日志白名单", () => {
     expect(serialized).not.toContain("Bearer token");
     expect(serialized).not.toContain("session=secret");
     expect(serialized).not.toContain("secret-key");
+    expect(serialized).not.toContain("0.0.0.0");
+    expect(serialized).not.toContain("secret-host.example.test");
+    expect(serialized).not.toContain("PRIVATE_KEY_TOKEN_SECRET");
+  });
+
+  it("保留全部合法 StreamState、隧道错误码与 close code，同时丢弃未知 code", () => {
+    const lines: string[] = [];
+    const logger = new SafeServerProcessLogger((line) => lines.push(line), () => 1_000);
+    let sequence = 0;
+
+    for (const state of Object.values(StreamState)) {
+      logger.audit(JSON.stringify({
+        event: "stream.state",
+        occurredAtMs: 1_000 + sequence,
+        streamId: `stream-state-${sequence}`,
+        edgePeerId: "edge-peer-1",
+        state
+      }));
+      sequence += 1;
+    }
+    for (const errorCode of Object.values(TunnelErrorCode)) {
+      logger.audit(JSON.stringify({
+        event: "stream.rejected",
+        occurredAtMs: 1_000 + sequence,
+        streamId: `stream-error-${sequence}`,
+        edgePeerId: "edge-peer-1",
+        state: StreamState.REJECTED,
+        errorCode
+      }));
+      sequence += 1;
+    }
+    for (const closeCode of Object.values(StreamCloseCode)) {
+      logger.audit(JSON.stringify({
+        event: "stream.closed",
+        occurredAtMs: 1_000 + sequence,
+        streamId: `stream-close-${sequence}`,
+        edgePeerId: "edge-peer-1",
+        state: StreamState.CLOSED,
+        closeCode
+      }));
+      sequence += 1;
+    }
+    logger.audit(JSON.stringify({
+      event: "stream.rejected",
+      occurredAtMs: 9_999,
+      streamId: "stream-malicious",
+      edgePeerId: "edge-peer-1",
+      state: StreamState.REJECTED,
+      errorCode: "PRIVATE_KEY_TOKEN_SECRET",
+      closeCode: "CAPABILITY_SECRET"
+    }));
+
+    const records = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records.slice(0, Object.values(StreamState).length).map((record) => record.state)).toEqual(
+      Object.values(StreamState)
+    );
+    expect(records.map((record) => record.errorCode).filter((code) => code !== undefined)).toEqual(
+      Object.values(TunnelErrorCode)
+    );
+    expect(records.map((record) => record.closeCode).filter((code) => code !== undefined)).toEqual(
+      Object.values(StreamCloseCode)
+    );
+    expect(lines.join("")).not.toMatch(/PRIVATE_KEY_TOKEN_SECRET|CAPABILITY_SECRET/u);
+  });
+
+  it("throwing writer 对 lifecycle、audit 和 metrics 均保持失败隔离", () => {
+    const logger = new SafeServerProcessLogger(() => {
+      throw new Error("injected-writer-failure");
+    }, () => 1_000);
+    const metrics: StreamMetricsSnapshot = {
+      authenticatedEdgePeers: 1,
+      authenticatedAgentPeers: 1,
+      activeStreamsByAgent: { "agent-1": 1 },
+      rejectedStreamsByEdgeUser: { "user-1": 1 },
+      closedStreamsByReason: { NORMAL: 1 },
+      bufferWatermark: { currentBytes: 0, peakBytes: 1, limitBytes: 1_024 }
+    };
+
+    expect(() => logger.lifecycle("server.started", { listenPort: 8_443 })).not.toThrow();
+    expect(() => logger.audit(JSON.stringify({
+      event: "stream.closed",
+      occurredAtMs: 1_000,
+      streamId: "stream-1",
+      edgePeerId: "edge-peer-1",
+      state: StreamState.CLOSED,
+      closeCode: StreamCloseCode.NORMAL
+    }))).not.toThrow();
+    expect(() => logger.metrics(metrics)).not.toThrow();
   });
 });
 

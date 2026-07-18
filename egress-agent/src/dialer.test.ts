@@ -261,13 +261,13 @@ function openFrame(streamId: Uint8Array, capability: Uint8Array, hostname = HOST
   );
 }
 
-function malformedPortFrame(streamId: Uint8Array, capability: Uint8Array): TunnelFrame {
+function malformedPortFrame(streamId: Uint8Array, capability: Uint8Array, port = 444): TunnelFrame {
   const hostname = new TextEncoder().encode(HOSTNAME);
   const payload = new Uint8Array(5 + hostname.byteLength + capability.byteLength);
   payload[0] = hostname.byteLength;
   payload.set(hostname, 1);
   const view = new DataView(payload.buffer);
-  view.setUint16(1 + hostname.byteLength, 444);
+  view.setUint16(1 + hostname.byteLength, port);
   view.setUint16(3 + hostname.byteLength, capability.byteLength);
   payload.set(capability, 5 + hostname.byteLength);
   return {
@@ -344,11 +344,21 @@ describe("egress agent final authorization and restricted TCP dialing", () => {
       readonly expected: string;
     }> = [
       { makeFrame: (streamId, capability) => openFrame(streamId, capability, "127.0.0.1"), expected: TunnelErrorCode.DESTINATION_REJECTED },
+      { makeFrame: (streamId, capability) => openFrame(streamId, capability, "127.1"), expected: TunnelErrorCode.DESTINATION_REJECTED },
+      { makeFrame: (streamId, capability) => openFrame(streamId, capability, "2130706433"), expected: TunnelErrorCode.DESTINATION_REJECTED },
+      { makeFrame: (streamId, capability) => openFrame(streamId, capability, "0x7f000001"), expected: TunnelErrorCode.DESTINATION_REJECTED },
       { makeFrame: (streamId, capability) => openFrame(streamId, capability, "[::1]"), expected: TunnelErrorCode.DESTINATION_REJECTED },
+      { makeFrame: (streamId, capability) => openFrame(streamId, capability, "::1"), expected: TunnelErrorCode.DESTINATION_REJECTED },
+      { makeFrame: (streamId, capability) => openFrame(streamId, capability, "[2001:db8::1]"), expected: TunnelErrorCode.DESTINATION_REJECTED },
       // 最终边界按精确 hostname，而非 DNS 结果授权；即使部署时二者解析到同一 IP 也不可拨号。
       { makeFrame: (streamId, capability) => openFrame(streamId, capability, "same-ip-alias.integration.test"), expected: TunnelErrorCode.DESTINATION_REJECTED },
       { makeFrame: (streamId, capability) => openFrame(streamId, capability, `other.${HOSTNAME}`), expected: TunnelErrorCode.DESTINATION_REJECTED },
-      { makeFrame: malformedPortFrame, expected: TunnelErrorCode.CAPABILITY_INVALID },
+      { makeFrame: (streamId, capability) => openFrame(streamId, capability, `${HOSTNAME}.example.test`), expected: TunnelErrorCode.DESTINATION_REJECTED },
+      { makeFrame: (streamId, capability) => openFrame(streamId, capability, `prefix-${HOSTNAME}`), expected: TunnelErrorCode.DESTINATION_REJECTED },
+      { makeFrame: (streamId, capability) => openFrame(streamId, capability, `${HOSTNAME}.`), expected: TunnelErrorCode.DESTINATION_REJECTED },
+      { makeFrame: (streamId, capability) => malformedPortFrame(streamId, capability, 80), expected: TunnelErrorCode.CAPABILITY_INVALID },
+      { makeFrame: (streamId, capability) => malformedPortFrame(streamId, capability, 444), expected: TunnelErrorCode.CAPABILITY_INVALID },
+      { makeFrame: (streamId, capability) => malformedPortFrame(streamId, capability, 8_443), expected: TunnelErrorCode.CAPABILITY_INVALID },
       {
         makeFrame: (streamId, capability) => {
           const tampered = Uint8Array.from(capability);
@@ -372,6 +382,69 @@ describe("egress agent final authorization and restricted TCP dialing", () => {
       expect(connector.calls).toEqual([]);
       expect(lastErrorCode(sent)).toBe(attempt.expected);
     }
+
+    const config = createConfig();
+    const { identity, credentials } = createServerFixture();
+    const connector = new FakeConnector();
+    const dialer = new EgressAgentDialer({ config, capabilityServerIdentity: identity, connector, now: () => NOW_MS + 1 });
+    const { session } = createSession();
+    const streamId = createStreamId();
+    dialer.handleFrame(session, openFrame(streamId, issueOpenCapability(credentials, streamId), HOSTNAME.toUpperCase()));
+    expect(connector.calls).toEqual([{ hostname: HOSTNAME, port: 443 }]);
+  });
+
+  it("阶段 6 在最终 dialer 独立拒绝过期、伪造和 replay capability 且不增加 TCP 拨号", () => {
+    const config = createConfig();
+    const { identity, credentials } = createServerFixture();
+
+    const expiredConnector = new FakeConnector();
+    const expiredDialer = new EgressAgentDialer({
+      config,
+      capabilityServerIdentity: identity,
+      connector: expiredConnector,
+      now: () => NOW_MS + 100
+    });
+    const expiredSession = createSession();
+    const expiredId = createStreamId();
+    const expiredCapability = issueCapability({
+      credentials,
+      binding: {
+        edgeUserId: "edge-user-1",
+        edgeDeviceId: "edge-device-1",
+        agentId: "company-agent-1",
+        streamId: expiredId,
+        destination: { hostname: HOSTNAME, port: 443 }
+      },
+      allowedDestination: { hostname: HOSTNAME, port: 443 },
+      nowMs: NOW_MS,
+      ttlMs: 100
+    });
+    expiredDialer.handleFrame(
+      { ...expiredSession.session, nowMs: NOW_MS + 100 },
+      openFrame(expiredId, expiredCapability)
+    );
+    expect(expiredConnector.calls).toHaveLength(0);
+    expect(lastErrorCode(expiredSession.sent)).toBe(TunnelErrorCode.CAPABILITY_INVALID);
+
+    const forgedConnector = new FakeConnector();
+    const forgedDialer = new EgressAgentDialer({ config, capabilityServerIdentity: identity, connector: forgedConnector, now: () => NOW_MS + 1 });
+    const forgedSession = createSession();
+    const forgedId = createStreamId();
+    const forged = Uint8Array.from(issueOpenCapability(credentials, forgedId));
+    forged[forged.byteLength - 1] = (forged[forged.byteLength - 1] ?? 0) ^ 1;
+    forgedDialer.handleFrame(forgedSession.session, openFrame(forgedId, forged));
+    expect(forgedConnector.calls).toHaveLength(0);
+    expect(lastErrorCode(forgedSession.sent)).toBe(TunnelErrorCode.CAPABILITY_INVALID);
+
+    const replayConnector = new FakeConnector();
+    const replayDialer = new EgressAgentDialer({ config, capabilityServerIdentity: identity, connector: replayConnector, now: () => NOW_MS + 1 });
+    const replaySession = createSession();
+    const replayId = createStreamId();
+    const replayFrame = openFrame(replayId, issueOpenCapability(credentials, replayId));
+    replayDialer.handleFrame(replaySession.session, replayFrame);
+    replayDialer.handleFrame(replaySession.session, replayFrame);
+    expect(replayConnector.calls).toHaveLength(1);
+    expect(lastErrorCode(replaySession.sent)).toBe(TunnelErrorCode.CAPABILITY_INVALID);
   });
 
   it("rejects capabilities bound to another agent or stream before dialing", () => {

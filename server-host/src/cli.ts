@@ -4,14 +4,20 @@ export interface ServerHostCliIo {
   readonly stderr: Pick<NodeJS.WritableStream, "write">;
 }
 
+const SAFE_CLI_CODES = new Set([
+  "SERVER_HOST_CLI_ARGUMENT_INVALID",
+  "SERVER_HOST_CLI_ARGUMENT_REQUIRED",
+  "SERVER_HOST_COMPONENT_MISMATCH",
+  "SERVER_HOST_LISTEN_FAILED",
+  "SERVER_HOST_RELOAD_REQUIRES_RESTART",
+  "SERVER_HOST_START_FAILED",
+  "SERVER_HOST_TLS_CREDENTIALS_INVALID",
+  "SERVER_HOST_TLS_RELOAD_FAILED"
+]);
+
 function safeCode(error: unknown): string {
-  if (
-    error !== null &&
-    typeof error === "object" &&
-    "code" in error &&
-    typeof error.code === "string" &&
-    /^[A-Z][A-Z0-9_]{0,127}$/u.test(error.code)
-  ) {
+  if (error !== null && typeof error === "object" && "code" in error &&
+      typeof error.code === "string" && SAFE_CLI_CODES.has(error.code)) {
     return error.code;
   }
   return "SERVER_HOST_FAILED";

@@ -11,7 +11,32 @@ type EdgeLifecycleEvent =
   | "edge.stopped";
 
 const STATES = new Set(["offline", "connecting", "authenticating", "online", "closing", "backoff", "stopped"]);
-const SAFE_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,127}$/u;
+const SAFE_CODES = new Set([
+  "AUTH_EXPIRED",
+  "AUTH_FAILED",
+  "AUTH_REPLAYED",
+  "AUTH_UNAUTHORIZED",
+  "AUTH_TIMEOUT",
+  "BINARY_FRAME_REQUIRED",
+  "EACCES",
+  "EADDRINUSE",
+  "EDGE_HOST_COMPONENT_MISMATCH",
+  "EDGE_HOST_DESTINATION_INVALID",
+  "EDGE_HOST_LISTENER_INVALID",
+  "EDGE_HOST_NETWORK_POLICY_INVALID",
+  "EDGE_HOST_SERVER_URL_INVALID",
+  "EDGE_HOST_START_FAILED",
+  "EDGE_HOST_TERMINATED_DURING_START",
+  "EDGE_RECONNECT_JITTER_INVALID",
+  "EDGE_RECONNECT_ATTEMPT_INVALID",
+  "EDGE_RUNTIME_START_FAILED",
+  "EDGE_STREAM_ID_INVALID",
+  "HEARTBEAT_TIMEOUT",
+  "PROTOCOL_VIOLATION",
+  "RECONNECT_LIMIT_EXCEEDED",
+  "WSS_CONNECTION_FAILED",
+  "WSS_DISCONNECTED"
+]);
 
 function safeStatus(status: EdgeClientStatusSnapshot | undefined): Readonly<Record<string, string | number>> {
   if (status === undefined) {
@@ -21,7 +46,7 @@ function safeStatus(status: EdgeClientStatusSnapshot | undefined): Readonly<Reco
   const reconnectAttempts = Number.isSafeInteger(status.reconnectAttempts) && status.reconnectAttempts >= 0
     ? status.reconnectAttempts
     : 0;
-  const code = status.lastErrorCode !== undefined && SAFE_CODE_PATTERN.test(status.lastErrorCode)
+  const code = status.lastErrorCode !== undefined && SAFE_CODES.has(status.lastErrorCode)
     ? status.lastErrorCode
     : undefined;
   return Object.freeze({

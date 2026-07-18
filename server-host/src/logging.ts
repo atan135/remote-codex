@@ -1,4 +1,5 @@
 import type { StreamMetricsSnapshot } from "@remote-codex/server";
+import { StreamCloseCode, StreamState, TunnelErrorCode } from "@remote-codex/shared";
 
 export type ProcessLogWriter = (serializedRecord: string) => void;
 
@@ -11,6 +12,20 @@ type LifecycleEvent =
   | "server.start_failed";
 
 const SAFE_IDENTIFIER_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/u;
+const SAFE_AUDIT_EVENTS = new Set(["stream.rejected", "stream.state", "stream.closed"]);
+const SAFE_STREAM_STATES: ReadonlySet<string> = new Set(Object.values(StreamState));
+const SAFE_LIFECYCLE_CODES = new Set([
+  "SERVER_HOST_COMPONENT_MISMATCH",
+  "SERVER_HOST_LISTEN_FAILED",
+  "SERVER_HOST_RELOAD_REQUIRES_RESTART",
+  "SERVER_HOST_START_FAILED",
+  "SERVER_HOST_TLS_CREDENTIALS_INVALID",
+  "SERVER_HOST_TLS_RELOAD_FAILED"
+]);
+const SAFE_STREAM_CODES: ReadonlySet<string> = new Set([
+  ...Object.values(TunnelErrorCode),
+  ...Object.values(StreamCloseCode)
+]);
 const SAFE_AUDIT_FIELDS = Object.freeze([
   "event",
   "occurredAtMs",
@@ -36,10 +51,6 @@ function stableCounters(value: Readonly<Record<string, number>>): Readonly<Recor
   ));
 }
 
-function safeCode(code: string | undefined): string | undefined {
-  return code !== undefined && /^[A-Z][A-Z0-9_]{0,127}$/u.test(code) ? code : undefined;
-}
-
 export class SafeServerProcessLogger {
   public constructor(
     private readonly writer: ProcessLogWriter,
@@ -50,19 +61,17 @@ export class SafeServerProcessLogger {
     event: LifecycleEvent,
     fields: {
       readonly code?: string;
-      readonly listenHost?: string;
       readonly listenPort?: number;
-      readonly publicWssUrl?: string;
     } = {}
   ): void {
-    const code = safeCode(fields.code);
+    const code = fields.code !== undefined && SAFE_LIFECYCLE_CODES.has(fields.code) ? fields.code : undefined;
     this.write({
       event,
       occurredAtMs: this.now(),
       ...(code === undefined ? {} : { code }),
-      ...(fields.listenHost === undefined ? {} : { listenHost: fields.listenHost }),
-      ...(fields.listenPort === undefined ? {} : { listenPort: fields.listenPort }),
-      ...(fields.publicWssUrl === undefined ? {} : { publicWssUrl: fields.publicWssUrl })
+      ...(Number.isSafeInteger(fields.listenPort) && (fields.listenPort ?? 0) >= 0
+        ? { listenPort: fields.listenPort }
+        : {})
     });
   }
 
@@ -77,11 +86,34 @@ export class SafeServerProcessLogger {
       const safeRecord: Record<string, string | number> = {};
       for (const key of SAFE_AUDIT_FIELDS) {
         const value = record[key];
-        if (typeof value === "string" || (typeof value === "number" && Number.isSafeInteger(value) && value >= 0)) {
+        if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+          safeRecord[key] = value;
+          continue;
+        }
+        if (typeof value !== "string") {
+          continue;
+        }
+        if (key === "event" && SAFE_AUDIT_EVENTS.has(value)) {
+          safeRecord[key] = value;
+          continue;
+        }
+        if (key === "state" && SAFE_STREAM_STATES.has(value)) {
+          safeRecord[key] = value;
+          continue;
+        }
+        if ((key === "errorCode" || key === "closeCode") && SAFE_STREAM_CODES.has(value)) {
+          safeRecord[key] = value;
+          continue;
+        }
+        if (
+          (key === "streamId" || key === "edgePeerId" || key === "edgeUserId" ||
+            key === "edgeDeviceId" || key === "agentPeerId" || key === "agentId") &&
+          SAFE_IDENTIFIER_PATTERN.test(value)
+        ) {
           safeRecord[key] = value;
         }
       }
-      if (typeof safeRecord.event === "string") {
+      if (typeof safeRecord.event === "string" && typeof safeRecord.occurredAtMs === "number") {
         this.write(safeRecord);
       }
     } catch {
@@ -107,6 +139,10 @@ export class SafeServerProcessLogger {
   }
 
   private write(record: Readonly<Record<string, unknown>>): void {
-    this.writer(`${JSON.stringify(record)}\n`);
+    try {
+      this.writer(`${JSON.stringify(record)}\n`);
+    } catch {
+      // 日志 writer 故障不能影响 listener、TLS reload、stream 或 shutdown。
+    }
   }
 }

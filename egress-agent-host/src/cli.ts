@@ -8,14 +8,18 @@ export interface EgressAgentHostCliIo {
   readonly stderr: Pick<NodeJS.WritableStream, "write">;
 }
 
+const SAFE_CLI_CODES = new Set([
+  "AGENT_HOST_CLI_ARGUMENT_INVALID",
+  "AGENT_HOST_CLI_ARGUMENT_REQUIRED",
+  "AGENT_HOST_COMPONENT_MISMATCH",
+  "AGENT_HOST_LIFETIME_INIT_FAILED",
+  "AGENT_HOST_SERVER_URL_INVALID",
+  "AGENT_HOST_START_FAILED"
+]);
+
 function safeCode(error: unknown): string {
-  if (
-    error !== null &&
-    typeof error === "object" &&
-    "code" in error &&
-    typeof error.code === "string" &&
-    /^[A-Z][A-Z0-9_]{0,127}$/u.test(error.code)
-  ) {
+  if (error !== null && typeof error === "object" && "code" in error &&
+      typeof error.code === "string" && SAFE_CLI_CODES.has(error.code)) {
     return error.code;
   }
   return "AGENT_HOST_FAILED";

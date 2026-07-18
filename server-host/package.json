@@ -17,7 +17,8 @@
   },
   "dependencies": {
     "@remote-codex/ops": "workspace:*",
-    "@remote-codex/server": "workspace:*"
+    "@remote-codex/server": "workspace:*",
+    "@remote-codex/shared": "workspace:*"
   },
   "scripts": {
     "lint": "eslint src --max-warnings=0",

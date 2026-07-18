@@ -60,14 +60,15 @@ export class EgressAgentHostError extends Error {
   }
 }
 
+const SAFE_AGENT_HOST_ERROR_CODES = new Set([
+  "AGENT_HOST_COMPONENT_MISMATCH",
+  "AGENT_HOST_LIFETIME_INIT_FAILED",
+  "AGENT_HOST_SERVER_URL_INVALID",
+  "AGENT_HOST_START_FAILED"
+]);
+
 function safeErrorCode(error: unknown, fallback: string): string {
-  if (
-    error !== null &&
-    typeof error === "object" &&
-    "code" in error &&
-    typeof error.code === "string" &&
-    /^[A-Z][A-Z0-9_]{0,127}$/u.test(error.code)
-  ) {
+  if (error instanceof EgressAgentHostError && SAFE_AGENT_HOST_ERROR_CODES.has(error.code)) {
     return error.code;
   }
   return fallback;

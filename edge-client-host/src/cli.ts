@@ -13,14 +13,24 @@ export interface EdgeClientHostSignalSource {
   once(signal: "SIGTERM" | "SIGINT", listener: () => void): unknown;
 }
 
+const SAFE_CLI_CODES = new Set([
+  "EACCES",
+  "EADDRINUSE",
+  "EDGE_HOST_CLI_ARGUMENT_INVALID",
+  "EDGE_HOST_CLI_ARGUMENT_REQUIRED",
+  "EDGE_HOST_COMPONENT_MISMATCH",
+  "EDGE_HOST_DESTINATION_INVALID",
+  "EDGE_HOST_LISTENER_INVALID",
+  "EDGE_HOST_NETWORK_POLICY_INVALID",
+  "EDGE_HOST_SERVER_URL_INVALID",
+  "EDGE_HOST_START_FAILED",
+  "EDGE_HOST_TERMINATED_DURING_START",
+  "EDGE_RUNTIME_START_FAILED"
+]);
+
 function safeCode(error: unknown): string {
-  if (
-    error !== null &&
-    typeof error === "object" &&
-    "code" in error &&
-    typeof error.code === "string" &&
-    /^[A-Z][A-Z0-9_]{0,127}$/u.test(error.code)
-  ) {
+  if (error !== null && typeof error === "object" && "code" in error &&
+      typeof error.code === "string" && SAFE_CLI_CODES.has(error.code)) {
     return error.code;
   }
   return "EDGE_HOST_FAILED";

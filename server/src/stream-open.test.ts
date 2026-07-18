@@ -299,6 +299,24 @@ function edgeOpen(id: Uint8Array, hostname = DEFAULT_ALLOWED_DESTINATION.hostnam
   );
 }
 
+function rawEdgeOpen(id: Uint8Array, hostname: string, port: number): TunnelFrame {
+  const hostnameBytes = new TextEncoder().encode(hostname);
+  const capability = Uint8Array.of(1);
+  const payload = new Uint8Array(5 + hostnameBytes.byteLength + capability.byteLength);
+  payload[0] = hostnameBytes.byteLength;
+  payload.set(hostnameBytes, 1);
+  const view = new DataView(payload.buffer);
+  view.setUint16(1 + hostnameBytes.byteLength, port);
+  view.setUint16(3 + hostnameBytes.byteLength, capability.byteLength);
+  payload.set(capability, 5 + hostnameBytes.byteLength);
+  return {
+    type: FrameType.STREAM_OPEN,
+    flags: 0,
+    streamId: Uint8Array.from(id),
+    payload
+  };
+}
+
 function credit(id: Uint8Array, bytes: number): TunnelFrame {
   return streamFrame(FrameType.STREAM_CREDIT, id, encodeStreamCreditPayload({ bytes }));
 }
@@ -454,6 +472,59 @@ describe("server stream.open 授权与 capability 签发", () => {
       (frame) => errorCode(frame as TunnelFrame) === TunnelErrorCode.PROTOCOL_VIOLATION
     );
     expect(coordinator.getActiveStreams()).toHaveLength(1);
+    coordinator.close();
+  });
+
+  it("阶段 6 绕过 edge 的 raw STREAM_OPEN 在 server 早拒绝且绝不发往错误 agent", () => {
+    const fixture = createFixture();
+    const peers = new FakePeerSessions();
+    const alicePeer = edgeSession("edge-peer-alice", fixture.alice);
+    const wrongAgentPeer = agentSession("agent-peer-other", fixture.otherAgent);
+    peers.connect(alicePeer);
+    peers.connect(wrongAgentPeer);
+    const coordinator = new StreamOpenCoordinator({
+      peerSessions: peers,
+      authorizationRegistry: createRegistry(fixture),
+      signingCredentials: fixture.signingCredentials,
+      allowedDestination: DEFAULT_ALLOWED_DESTINATION
+    });
+
+    peers.emit(alicePeer.peerId, edgeOpen(streamId(1)));
+    expect(errorCode(peers.framesFor(alicePeer.peerId, FrameType.STREAM_REJECTED).at(-1)!)).toBe(
+      TunnelErrorCode.PEER_DISCONNECTED
+    );
+    expect(peers.framesFor(wrongAgentPeer.peerId, FrameType.STREAM_OPEN)).toHaveLength(0);
+
+    const correctAgentPeer = agentSession("agent-peer-shared", fixture.sharedAgent);
+    peers.connect(correctAgentPeer);
+    const hostname = DEFAULT_ALLOWED_DESTINATION.hostname;
+    const deniedFrames = [
+      edgeOpen(streamId(17), "other.example.test"),
+      edgeOpen(streamId(33), `sub.${hostname}`),
+      edgeOpen(streamId(49), `${hostname}.example.test`),
+      edgeOpen(streamId(65), `prefix-${hostname}`),
+      edgeOpen(streamId(81), `${hostname}.`),
+      edgeOpen(streamId(97), "127.0.0.1"),
+      edgeOpen(streamId(113), "127.1"),
+      edgeOpen(streamId(129), "2130706433"),
+      edgeOpen(streamId(145), "[::1]"),
+      edgeOpen(streamId(161), "[2001:db8::1]"),
+      rawEdgeOpen(streamId(177), hostname, 80),
+      rawEdgeOpen(streamId(193), hostname, 444),
+      rawEdgeOpen(streamId(209), hostname, 8_443)
+    ];
+
+    for (const frame of deniedFrames) {
+      peers.emit(alicePeer.peerId, frame);
+    }
+
+    expect(peers.framesFor(correctAgentPeer.peerId, FrameType.STREAM_OPEN)).toHaveLength(0);
+    expect(coordinator.getActiveStreams()).toHaveLength(0);
+    expect(peers.framesFor(alicePeer.peerId, FrameType.STREAM_REJECTED)).toHaveLength(deniedFrames.length + 1);
+
+    peers.emit(alicePeer.peerId, edgeOpen(streamId(225), hostname.toUpperCase()));
+    expect(peers.framesFor(correctAgentPeer.peerId, FrameType.STREAM_OPEN)).toHaveLength(1);
+    expect(openPayload(peers.framesFor(correctAgentPeer.peerId, FrameType.STREAM_OPEN)[0]!).hostname).toBe(hostname);
     coordinator.close();
   });
 

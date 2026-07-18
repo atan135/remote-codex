@@ -113,6 +113,9 @@ importers:
       '@remote-codex/server':
         specifier: workspace:*
         version: link:../server
+      '@remote-codex/shared':
+        specifier: workspace:*
+        version: link:../shared
 
   shared: {}
 

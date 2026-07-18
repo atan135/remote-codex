@@ -281,10 +281,50 @@ describe("egress agent production host", () => {
     expect(result).toBe(1);
     expect(stderr).toEqual([`${JSON.stringify({ ok: false, code: "AGENT_HOST_START_FAILED" })}\n`]);
     expect(stderr.join("")).not.toContain(secret);
+
+    const maliciousCode = "PRIVATE_KEY_TOKEN_SECRET";
+    const maliciousStderr: string[] = [];
+    const maliciousResult = runEgressAgentHostCli(
+      ["--root", "config-root"],
+      { stderr: { write: (value) => { maliciousStderr.push(String(value)); return true; } } },
+      {
+        loadBundle: (() => {
+          throw Object.assign(new Error(secret), { code: maliciousCode });
+        }) as () => LoadedProductionBundle
+      }
+    );
+    expect(maliciousResult).toBe(1);
+    expect(maliciousStderr).toEqual([`${JSON.stringify({ ok: false, code: "AGENT_HOST_START_FAILED" })}\n`]);
+    expect(maliciousStderr.join("")).not.toContain(maliciousCode);
   });
 });
 
 describe("owner-only 持久状态日志", () => {
+  it("恶意状态对象只留下白名单状态且不回显 URL、身份、token 或异常码正文", () => {
+    const lines: string[] = [];
+    const logger = new SafeEgressAgentProcessLogger((line) => lines.push(line), () => 1_000);
+    logger.lifecycle("agent.state_changed", {
+      state: "backoff",
+      reconnectAttempts: 1,
+      lastErrorCode: "PRIVATE_KEY_TOKEN_SECRET",
+      serverUrl: "wss://secret-host.example.test:8443/tunnel",
+      hostname: "gateway.example.test",
+      agentId: "secret-agent-id",
+      keyId: "secret-key-id",
+      authorization: "Bearer secret-token",
+      capability: "secret-capability",
+      payload: "TLS secret bytes"
+    } as unknown as EgressAgentStatusSnapshot);
+
+    expect(JSON.parse(lines.join(""))).toEqual({
+      event: "agent.state_changed",
+      occurredAtMs: 1_000,
+      state: "backoff",
+      reconnectAttempts: 1
+    });
+    expect(lines.join("")).not.toMatch(/secret|wss:|gateway|Bearer|TLS/iu);
+  });
+
   it("按字节上限轮转并只保留固定数量的脱敏 NDJSON 文件", () => {
     const parent = mkdtempSync(join(tmpdir(), "remote-codex-agent-log-"));
     const root = join(parent, "config");

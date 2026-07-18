@@ -366,6 +366,45 @@ describe("LoopbackConnectProxy", () => {
     expect(gateway.streams).toHaveLength(0);
   });
 
+  it("阶段 6 目标矩阵只接受大小写等价的精确 hostname，所有绕过均不创建 stream", async () => {
+    const gateway = new FakeGateway();
+    const proxy = await startProxy(gateway);
+    const hostname = DEFAULT_ALLOWED_DESTINATION.hostname;
+    const deniedAuthorities = [
+      "other.example.test:443",
+      `sub.${hostname}:443`,
+      `${hostname}.example.test:443`,
+      `prefix-${hostname}:443`,
+      `${hostname}.:443`,
+      "127.0.0.1:443",
+      "127.1:443",
+      "2130706433:443",
+      "0x7f000001:443",
+      "[::1]:443",
+      "[2001:db8::1]:443",
+      `${hostname}:80`,
+      `${hostname}:444`,
+      `${hostname}:8443`
+    ];
+
+    for (const authority of deniedAuthorities) {
+      const capture = await request(proxy, `CONNECT ${authority} HTTP/1.1\r\n\r\n`);
+      await waitFor(() => capture.ended);
+      expect(capturedText(capture)).toMatch(/HTTP\/1\.1 (400 Bad Request|403 Forbidden)/u);
+    }
+
+    expect(gateway.streams).toHaveLength(0);
+    expect(gateway.destinations).toHaveLength(0);
+
+    const equivalent = await request(
+      proxy,
+      `CONNECT ${hostname.toUpperCase()}:443 HTTP/1.1\r\n\r\n`
+    );
+    await waitFor(() => gateway.streams.length === 1);
+    expect(gateway.destinations).toEqual([DEFAULT_ALLOWED_DESTINATION]);
+    equivalent.socket.destroy();
+  });
+
   it("拒绝 body、upgrade 与 CONNECT header 后的额外字节", async () => {
     const gateway = new FakeGateway();
     const proxy = await startProxy(gateway);

@@ -402,6 +402,21 @@ describe("edge production host", () => {
     expect(result).toBe(1);
     expect(stderr).toEqual([`${JSON.stringify({ ok: false, code: "EDGE_HOST_START_FAILED" })}\n`]);
     expect(stderr.join("")).not.toContain(secret);
+
+    const maliciousCode = "PRIVATE_KEY_TOKEN_SECRET";
+    const maliciousStderr: string[] = [];
+    const maliciousResult = await runEdgeClientHostCli(
+      ["--root", "config-root"],
+      { stderr: { write: (value) => { maliciousStderr.push(String(value)); return true; } } },
+      {
+        loadBundle: (() => {
+          throw Object.assign(new Error(secret), { code: maliciousCode });
+        }) as () => LoadedProductionBundle
+      }
+    );
+    expect(maliciousResult).toBe(1);
+    expect(maliciousStderr).toEqual([`${JSON.stringify({ ok: false, code: "EDGE_HOST_START_FAILED" })}\n`]);
+    expect(maliciousStderr.join("")).not.toContain(maliciousCode);
   });
 
   it("CLI 双信号与 runtime terminal 并发仍只执行一次 shutdown", async () => {
@@ -436,6 +451,30 @@ describe("edge production host", () => {
 });
 
 describe("owner-only edge 状态日志", () => {
+  it("恶意 CONNECT/身份/异常状态只留下白名单字段且不回显网络或凭据", () => {
+    const lines: string[] = [];
+    const logger = new SafeEdgeProcessLogger((line) => lines.push(line), () => 1_000);
+    logger.lifecycle("edge.state_changed", {
+      state: "backoff",
+      reconnectAttempts: 1,
+      lastErrorCode: "PRIVATE_KEY_TOKEN_SECRET",
+      connectAuthority: "gateway.example.test:443",
+      headers: "Authorization: Bearer secret-token; Cookie: secret-cookie",
+      edgeUserId: "secret-user-id",
+      edgeDeviceId: "secret-device-id",
+      keyId: "secret-key-id",
+      payload: "TLS secret bytes"
+    } as unknown as EdgeClientStatusSnapshot);
+
+    expect(JSON.parse(lines.join(""))).toEqual({
+      event: "edge.state_changed",
+      occurredAtMs: 1_000,
+      state: "backoff",
+      reconnectAttempts: 1
+    });
+    expect(lines.join("")).not.toMatch(/secret|gateway|Authorization|Cookie|TLS/iu);
+  });
+
   it("按字节上限轮转并只保留固定数量的脱敏 NDJSON", () => {
     const parent = mkdtempSync(join(tmpdir(), "remote-codex-edge-log-"));
     const root = join(parent, "config");

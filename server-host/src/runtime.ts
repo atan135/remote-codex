@@ -38,14 +38,17 @@ export class ServerHostError extends Error {
   }
 }
 
+const SAFE_SERVER_HOST_ERROR_CODES = new Set([
+  "SERVER_HOST_COMPONENT_MISMATCH",
+  "SERVER_HOST_LISTEN_FAILED",
+  "SERVER_HOST_RELOAD_REQUIRES_RESTART",
+  "SERVER_HOST_START_FAILED",
+  "SERVER_HOST_TLS_CREDENTIALS_INVALID",
+  "SERVER_HOST_TLS_RELOAD_FAILED"
+]);
+
 function safeErrorCode(error: unknown, fallback: string): string {
-  if (
-    error !== null &&
-    typeof error === "object" &&
-    "code" in error &&
-    typeof error.code === "string" &&
-    /^[A-Z][A-Z0-9_]{0,127}$/u.test(error.code)
-  ) {
+  if (error instanceof ServerHostError && SAFE_SERVER_HOST_ERROR_CODES.has(error.code)) {
     return error.code;
   }
   return fallback;
@@ -158,9 +161,7 @@ export async function startServerHost(
   metricsTimer.unref();
 
   logger.lifecycle("server.started", {
-    listenHost: bundle.hostConfig.listenHost,
-    listenPort: bundle.hostConfig.listenPort,
-    publicWssUrl
+    listenPort: bundle.hostConfig.listenPort
   });
 
   return Object.freeze({
