@@ -5,3 +5,4 @@ packages:
   - "shared"
   - "ops"
   - "server-host"
+  - "egress-agent-host"

@@ -57,7 +57,7 @@ export interface LoadedEgressAgentProductionBundle {
   readonly component: "egress-agent";
   readonly config: EgressAgentConfig;
   readonly identity: EgressAgentIdentity;
-  readonly authenticationPrivateKey: IdentityPrivateKey;
+  readonly authenticationPrivateKey: IdentityPrivateKey<"egress-agent-authentication">;
   readonly serverIdentity: ServerSigningIdentity;
 }
 
@@ -65,7 +65,7 @@ export interface LoadedEdgeClientProductionBundle {
   readonly component: "edge-client";
   readonly config: EdgeClientConfig;
   readonly identity: EdgeDeviceIdentity;
-  readonly authenticationPrivateKey: IdentityPrivateKey;
+  readonly authenticationPrivateKey: IdentityPrivateKey<"edge-device-authentication">;
   readonly serverIdentity: ServerSigningIdentity;
 }
 

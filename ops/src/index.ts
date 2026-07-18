@@ -22,8 +22,11 @@ export {
   type LoadedServerProductionBundle
 } from "./production-loader.js";
 export {
+  assertSecureFile,
+  createOwnerOnlyDirectoryAtPath,
   evaluatePosixMode,
   evaluatePosixDirectoryMode,
+  hardenOwnerOnly,
   readDeploymentFile,
   resolveDeploymentFile,
   type FileSensitivity

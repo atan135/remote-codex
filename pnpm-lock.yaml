@@ -56,6 +56,18 @@ importers:
         specifier: 8.5.14
         version: 8.5.14
 
+  egress-agent-host:
+    dependencies:
+      '@remote-codex/egress-agent':
+        specifier: workspace:*
+        version: link:../egress-agent
+      '@remote-codex/ops':
+        specifier: workspace:*
+        version: link:../ops
+      '@remote-codex/shared':
+        specifier: workspace:*
+        version: link:../shared
+
   ops:
     dependencies:
       '@remote-codex/server':

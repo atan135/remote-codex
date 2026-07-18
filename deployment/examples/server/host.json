@@ -5,7 +5,7 @@
   "publicHostname": "tunnel.example.invalid",
   "allowedOrigins": [
     "https://edge.example.invalid",
-    "https://agent.example.invalid"
+    "https://tunnel.example.invalid:8443"
   ],
   "tlsCertificatePath": "tls/fullchain.pem",
   "tlsPrivateKeyPath": "tls/private-key.pem",

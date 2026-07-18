@@ -6,6 +6,7 @@
     { "path": "./egress-agent" },
     { "path": "./edge-client" },
     { "path": "./ops" },
-    { "path": "./server-host" }
+    { "path": "./server-host" },
+    { "path": "./egress-agent-host" }
   ]
 }

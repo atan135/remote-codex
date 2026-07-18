@@ -1,7 +1,7 @@
 {
   "component": "egress-agent",
   "agentId": "company-agent-01",
-  "serverUrl": "wss://tunnel.example.invalid/tunnel",
+  "serverUrl": "wss://tunnel.example.invalid:8443/tunnel",
   "allowedDestination": {
     "hostname": "gateway.example.invalid",
     "port": 443
