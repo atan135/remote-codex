@@ -34,6 +34,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 
 import {
   calculateEdgeReconnectDelayMs,
+  edgeOriginForServerUrl,
   EdgeClientRuntime,
   EdgeClientRuntimeError,
   loadEdgeClientConfig,
@@ -137,12 +138,12 @@ class FakeSocket implements EdgeSocket {
 
 class FakeSocketFactory implements EdgeSocketFactory {
   public readonly sockets: FakeSocket[] = [];
-  public readonly connections: string[] = [];
+  public readonly connections: Array<Readonly<{ serverUrl: string; origin: string }>> = [];
 
-  public connect(serverUrl: URL): EdgeSocket {
+  public connect(serverUrl: URL, origin: string): EdgeSocket {
     const socket = new FakeSocket();
     this.sockets.push(socket);
-    this.connections.push(serverUrl.href);
+    this.connections.push({ serverUrl: serverUrl.href, origin });
     return socket;
   }
 }
@@ -283,7 +284,10 @@ describe("edge persistent WSS session", () => {
     });
 
     runtime.start();
-    expect(sockets.connections).toEqual(["wss://tunnel.example.test/tunnel"]);
+    expect(sockets.connections).toEqual([{
+      serverUrl: "wss://tunnel.example.test/tunnel",
+      origin: "https://tunnel.example.test"
+    }]);
     const socket = sockets.sockets[0];
     if (socket === undefined) {
       throw new Error("expected first WSS socket");
@@ -1113,6 +1117,15 @@ describe("edge persistent WSS session", () => {
     expect(calculateEdgeReconnectDelayMs(1, createConfig().limits, () => 0)).toBe(50);
     expect(calculateEdgeReconnectDelayMs(3, createConfig().limits, () => 1)).toBe(400);
     expect(() => calculateEdgeReconnectDelayMs(1, createConfig().limits, () => -1)).toThrow("EDGE_RECONNECT_JITTER_INVALID");
+    expect(edgeOriginForServerUrl(new URL("wss://tunnel.example.test:8443/tunnel"))).toBe(
+      "https://tunnel.example.test:8443"
+    );
+    expect(() => edgeOriginForServerUrl(new URL("https://tunnel.example.test:8443"))).toThrow("EDGE_ORIGIN_INVALID");
+    expect(() => new EdgeClientRuntime({
+      config: createConfig(),
+      ...createIdentity(),
+      origin: "https://tunnel.example.test/path"
+    })).toThrow("EDGE_ORIGIN_INVALID");
 
     const identity = createIdentity();
     const mismatched = createEdgeDeviceIdentity({

@@ -64,7 +64,7 @@ export interface EdgeSocket {
 }
 
 export interface EdgeSocketFactory {
-  connect(serverUrl: URL): EdgeSocket;
+  connect(serverUrl: URL, origin: string): EdgeSocket;
 }
 
 export interface EdgeClientRuntimeOptions {
@@ -74,6 +74,11 @@ export interface EdgeClientRuntimeOptions {
   readonly authenticationIdentity: EdgeDeviceIdentity;
   /** 仅用于服务端 challenge 签名的私钥，永不写入 URL、日志或代理接口。 */
   readonly authenticationKey: IdentityPrivateKey<typeof IdentityKeyRole.EDGE_DEVICE_AUTHENTICATION>;
+  /**
+   * 由已验证 WSS endpoint 确定的 HTTPS Origin。它只参与 server 握手来源策略，
+   * 不能替代 edge user/device 的 challenge 签名认证。
+   */
+  readonly origin?: string;
   readonly socketFactory?: EdgeSocketFactory;
   readonly now?: () => number;
   readonly random?: () => number;
@@ -262,9 +267,38 @@ class WsEdgeSocket implements EdgeSocket {
 }
 
 class DefaultEdgeSocketFactory implements EdgeSocketFactory {
-  public connect(serverUrl: URL): EdgeSocket {
-    return new WsEdgeSocket(new WebSocket(serverUrl, { perMessageDeflate: false }));
+  public connect(serverUrl: URL, origin: string): EdgeSocket {
+    return new WsEdgeSocket(new WebSocket(serverUrl, { origin, perMessageDeflate: false }));
   }
+}
+
+function parseOrigin(origin: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return fail("EDGE_ORIGIN_INVALID");
+  }
+
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.origin !== origin ||
+    parsed.username.length > 0 ||
+    parsed.password.length > 0 ||
+    parsed.search.length > 0 ||
+    parsed.hash.length > 0
+  ) {
+    return fail("EDGE_ORIGIN_INVALID");
+  }
+  return origin;
+}
+
+/** 非浏览器 WSS 客户端固定发送与唯一 server endpoint 对应的 HTTPS Origin。 */
+export function edgeOriginForServerUrl(serverUrl: URL): string {
+  if (serverUrl.protocol !== "wss:") {
+    return fail("EDGE_ORIGIN_INVALID");
+  }
+  return parseOrigin(`https://${serverUrl.host}`);
 }
 
 /**
@@ -275,6 +309,7 @@ export class EdgeClientRuntime implements EdgeStreamGateway {
   private readonly config: EdgeClientConfig;
   private readonly authenticationIdentity: EdgeDeviceIdentity;
   private readonly authenticationKey: IdentityPrivateKey<typeof IdentityKeyRole.EDGE_DEVICE_AUTHENTICATION>;
+  private readonly origin: string;
   private readonly socketFactory: EdgeSocketFactory;
   private readonly now: () => number;
   private readonly random: () => number;
@@ -296,6 +331,7 @@ export class EdgeClientRuntime implements EdgeStreamGateway {
     this.config = normalizedConfig(options.config);
     this.authenticationIdentity = options.authenticationIdentity;
     this.authenticationKey = options.authenticationKey;
+    this.origin = parseOrigin(options.origin ?? edgeOriginForServerUrl(this.config.serverUrl));
     this.socketFactory = options.socketFactory ?? new DefaultEdgeSocketFactory();
     this.now = options.now ?? Date.now;
     this.random = options.random ?? Math.random;
@@ -475,7 +511,7 @@ export class EdgeClientRuntime implements EdgeStreamGateway {
     this.transition("connecting");
     let socket: EdgeSocket;
     try {
-      socket = this.socketFactory.connect(this.config.serverUrl);
+      socket = this.socketFactory.connect(this.config.serverUrl, this.origin);
     } catch {
       this.scheduleReconnect({ code: "WSS_CONNECTION_FAILED", terminal: false });
       return;

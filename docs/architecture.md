@@ -51,6 +51,11 @@ edge-client 的 `LoopbackConnectProxy` 固定监听 IPv4 loopback `127.0.0.1`。
 stream。代理在收到 server/agent 端的 `STREAM_OPENED` 前暂停本地 socket；只有成功打开后
 才返回 `HTTP/1.1 200 Connection Established` 并开始转发不透明 TLS 字节。
 
+生产 `edge-client-host` 在创建任何 WSS 或 listener 前加载严格 edge bundle，固定校验
+`wss://<非 IP hostname>:<8000-9000>/tunnel`、`127.0.0.1:<8000-9000>` 和唯一目标
+`hostname:443`。非浏览器 WSS 客户端发送与 server URL 对应的 HTTPS Origin，以满足 server 的
+来源白名单；Origin 公开可构造且不参与身份授权，设备仍必须完成 Ed25519 challenge 认证。
+
 下列输入或能力一律拒绝：SOCKS5、普通 HTTP、absolute URL、非 `CONNECT` 方法、非
 HTTP/1.1、认证头（含 `Authorization` 与 `Proxy-Authorization`）、`Upgrade`、请求 body、
 `CONNECT` 头部后的额外字节、IP literal、非 `443`、IPv6 `::1`、局域网/公网 listener、

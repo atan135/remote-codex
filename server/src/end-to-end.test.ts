@@ -1,6 +1,6 @@
 import { generateKeyPairSync } from "node:crypto";
 import { once } from "node:events";
-import { connect, type AddressInfo, type Socket } from "node:net";
+import { connect, type Socket } from "node:net";
 import { createServer as createTlsServer, connect as connectTls, type Server as TlsServer, type TLSSocket } from "node:tls";
 
 import {
@@ -42,6 +42,7 @@ import {
 } from "../../egress-agent/src/runtime.js";
 import type { StreamAuditEvent } from "./observability.js";
 import { createTunnelServer, type TlsCredentials, type TunnelServer } from "./runtime.js";
+import { listenOnApprovedTestPort, startOnApprovedTestPort } from "./test-port-helper.js";
 
 const GATEWAY_HOSTNAME = "gateway.integration.test";
 const TUNNEL_TLS_HOSTNAME = "tunnel.integration.test";
@@ -424,10 +425,8 @@ class EndToEndFixture {
   }
 
   public async start(): Promise<void> {
-    this.gateway.listen(0, "127.0.0.1");
-    await once(this.gateway, "listening");
-    const gatewayAddress = this.gateway.address() as AddressInfo;
-    this.connector = new LoopbackGatewayConnector(gatewayAddress.port);
+    const gatewayPort = await listenOnApprovedTestPort(this.gateway);
+    this.connector = new LoopbackGatewayConnector(gatewayPort);
     await this.startTunnelServer();
     const serverUrl = `wss://127.0.0.1:${this.tunnelPort}/tunnel`;
     const agentConfig = parseEgressAgentConfig({
@@ -452,44 +451,67 @@ class EndToEndFixture {
       random: () => 0
     });
 
-    const edgeAConfig = parseEdgeClientConfig({
-      component: "edge-client",
-      edgeUserId: this.edgeAUserId,
-      edgeDeviceId: this.edgeADeviceId,
-      serverUrl,
-      listenHost: "127.0.0.1",
-      listenPort: 8787,
-      allowedDestination,
-      limits: testLimits
+    const edgeAStarted = await startOnApprovedTestPort(async (listenPort) => {
+      const config = parseEdgeClientConfig({
+        component: "edge-client",
+        edgeUserId: this.edgeAUserId,
+        edgeDeviceId: this.edgeADeviceId,
+        serverUrl,
+        listenHost: "127.0.0.1",
+        listenPort,
+        allowedDestination,
+        limits: testLimits
+      });
+      const runtime = new EdgeClientRuntime({
+        config,
+        authenticationIdentity: this.edgeAIdentity,
+        authenticationKey: this.edgeAAuthenticationKey,
+        origin: EDGE_A_ORIGIN,
+        socketFactory: this.edgeASockets,
+        random: () => 0
+      });
+      const proxy = new LoopbackConnectProxy({
+        allowedDestination,
+        limits: testLimits,
+        listenPort: config.listenPort,
+        streamGateway: runtime
+      });
+      await proxy.start();
+      return { config, proxy, runtime };
     });
-    const edgeBConfig = parseEdgeClientConfig({
-      component: "edge-client",
-      edgeUserId: this.edgeBUserId,
-      edgeDeviceId: this.edgeBDeviceId,
-      serverUrl,
-      listenHost: "127.0.0.1",
-      listenPort: 8788,
-      allowedDestination,
-      limits: testLimits
+    this.edgeA = edgeAStarted.value.runtime;
+    this.proxyA = edgeAStarted.value.proxy;
+
+    const edgeBStarted = await startOnApprovedTestPort(async (listenPort) => {
+      const config = parseEdgeClientConfig({
+        component: "edge-client",
+        edgeUserId: this.edgeBUserId,
+        edgeDeviceId: this.edgeBDeviceId,
+        serverUrl,
+        listenHost: "127.0.0.1",
+        listenPort,
+        allowedDestination,
+        limits: testLimits
+      });
+      const runtime = new EdgeClientRuntime({
+        config,
+        authenticationIdentity: this.edgeBIdentity,
+        authenticationKey: this.edgeBAuthenticationKey,
+        origin: EDGE_B_ORIGIN,
+        socketFactory: this.edgeBSockets,
+        random: () => 0
+      });
+      const proxy = new LoopbackConnectProxy({
+        allowedDestination,
+        limits: testLimits,
+        listenPort: config.listenPort,
+        streamGateway: runtime
+      });
+      await proxy.start();
+      return { config, proxy, runtime };
     });
-    this.edgeA = new EdgeClientRuntime({
-      config: edgeAConfig,
-      authenticationIdentity: this.edgeAIdentity,
-      authenticationKey: this.edgeAAuthenticationKey,
-      socketFactory: this.edgeASockets,
-      random: () => 0
-    });
-    this.edgeB = new EdgeClientRuntime({
-      config: edgeBConfig,
-      authenticationIdentity: this.edgeBIdentity,
-      authenticationKey: this.edgeBAuthenticationKey,
-      socketFactory: this.edgeBSockets,
-      random: () => 0
-    });
-    this.proxyA = new LoopbackConnectProxy({ allowedDestination, limits: testLimits, listenPort: 0, streamGateway: this.edgeA });
-    this.proxyB = new LoopbackConnectProxy({ allowedDestination, limits: testLimits, listenPort: 0, streamGateway: this.edgeB });
-    await this.proxyA.start();
-    await this.proxyB.start();
+    this.edgeB = edgeBStarted.value.runtime;
+    this.proxyB = edgeBStarted.value.proxy;
     this.agent.start();
     this.edgeA.start();
     this.edgeB.start();
@@ -542,7 +564,7 @@ class EndToEndFixture {
     await new Promise<void>((resolve) => this.gateway.close(() => resolve()));
   }
 
-  private async startTunnelServer(port = 0): Promise<void> {
+  private async startTunnelServer(port?: number): Promise<void> {
     this.tunnel = createTunnelServer({
       tls: tunnelTls,
       allowedOrigins: [EDGE_A_ORIGIN, EDGE_B_ORIGIN, AGENT_ORIGIN],
@@ -579,9 +601,13 @@ class EndToEndFixture {
         }
       }
     });
+    if (port === undefined) {
+      this.tunnelPort = await listenOnApprovedTestPort(this.tunnel.httpsServer);
+      return;
+    }
     this.tunnel.httpsServer.listen(port, "127.0.0.1");
     await once(this.tunnel.httpsServer, "listening");
-    this.tunnelPort = (this.tunnel.httpsServer.address() as AddressInfo).port;
+    this.tunnelPort = port;
   }
 
 }

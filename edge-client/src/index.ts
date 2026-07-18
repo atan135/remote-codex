@@ -14,6 +14,7 @@ export {
 
 export {
   calculateEdgeReconnectDelayMs,
+  edgeOriginForServerUrl,
   EdgeClientRuntime,
   EdgeClientRuntimeError,
   loadEdgeClientConfig,

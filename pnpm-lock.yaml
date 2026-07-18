@@ -43,6 +43,18 @@ importers:
         specifier: 8.5.14
         version: 8.5.14
 
+  edge-client-host:
+    dependencies:
+      '@remote-codex/edge-client':
+        specifier: workspace:*
+        version: link:../edge-client
+      '@remote-codex/ops':
+        specifier: workspace:*
+        version: link:../ops
+      '@remote-codex/shared':
+        specifier: workspace:*
+        version: link:../shared
+
   egress-agent:
     dependencies:
       '@remote-codex/shared':

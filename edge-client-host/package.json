@@ -1,0 +1,30 @@
+{
+  "name": "@remote-codex/edge-client-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "bin": {
+    "remote-codex-edge-client": "./dist/cli-main.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "lint": "eslint src --max-warnings=0",
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "pretest": "corepack pnpm --filter @remote-codex/shared build && corepack pnpm --filter @remote-codex/server build && corepack pnpm --filter @remote-codex/ops build && corepack pnpm --filter @remote-codex/edge-client build",
+    "test": "vitest run --coverage",
+    "build": "tsc --project tsconfig.json"
+  },
+  "dependencies": {
+    "@remote-codex/edge-client": "workspace:*",
+    "@remote-codex/ops": "workspace:*",
+    "@remote-codex/shared": "workspace:*"
+  }
+}

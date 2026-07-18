@@ -54,7 +54,7 @@ export interface LoopbackConnectProxyOptions {
   readonly allowedDestination: AllowedDestination;
   readonly limits: Pick<ResourceLimits, "maxConcurrentStreams" | "openTimeoutMs">;
   readonly streamGateway: EdgeStreamGateway;
-  /** 仅测试可使用 0 请求临时端口；生产配置必须使用 `EdgeClientConfig.listenPort`。 */
+  /** listener 始终使用获准的应用端口范围，生产值来自 `EdgeClientConfig.listenPort`。 */
   readonly listenPort?: number;
 }
 
@@ -86,7 +86,7 @@ function isLoopbackRemoteAddress(socket: Duplex): boolean {
 }
 
 function isSafePort(value: number): boolean {
-  return Number.isSafeInteger(value) && value >= 0 && value <= 65_535;
+  return Number.isSafeInteger(value) && value >= 8_000 && value <= 9_000;
 }
 
 function hasForbiddenConnectHeaders(request: IncomingMessage): boolean {
@@ -161,7 +161,7 @@ export class LoopbackConnectProxy {
 
   public constructor(options: LoopbackConnectProxyOptions) {
     if (!isSafePort(options.listenPort ?? 8_787)) {
-      throw new TypeError("listenPort must be an integer between 0 and 65535");
+      throw new TypeError("listenPort must be an integer between 8000 and 9000");
     }
 
     if (

@@ -64,6 +64,9 @@ interface SocketCapture {
 }
 
 const activeProxies: LoopbackConnectProxy[] = [];
+const TEST_PORT_MIN = 8_000;
+const TEST_PORT_MAX = 9_000;
+let nextTestPort = TEST_PORT_MIN + (process.pid % (TEST_PORT_MAX - TEST_PORT_MIN + 1));
 
 afterEach(async () => {
   while (activeProxies.length > 0) {
@@ -71,15 +74,41 @@ afterEach(async () => {
   }
 });
 
-function createProxy(gateway: EdgeStreamGateway, openTimeoutMs = 100, maxConcurrentStreams = 2): LoopbackConnectProxy {
-  const proxy = new LoopbackConnectProxy({
+function createProxyAtPort(
+  gateway: EdgeStreamGateway,
+  listenPort: number,
+  openTimeoutMs = 100,
+  maxConcurrentStreams = 2
+): LoopbackConnectProxy {
+  return new LoopbackConnectProxy({
     allowedDestination: DEFAULT_ALLOWED_DESTINATION,
     limits: { maxConcurrentStreams, openTimeoutMs },
-    listenPort: 0,
+    listenPort,
     streamGateway: gateway
   });
-  activeProxies.push(proxy);
-  return proxy;
+}
+
+async function startProxy(
+  gateway: EdgeStreamGateway,
+  openTimeoutMs = 100,
+  maxConcurrentStreams = 2
+): Promise<LoopbackConnectProxy> {
+  const candidateCount = TEST_PORT_MAX - TEST_PORT_MIN + 1;
+  for (let attempt = 0; attempt < candidateCount; attempt += 1) {
+    const port = nextTestPort;
+    nextTestPort = port >= TEST_PORT_MAX ? TEST_PORT_MIN : port + 1;
+    const proxy = createProxyAtPort(gateway, port, openTimeoutMs, maxConcurrentStreams);
+    try {
+      await proxy.start();
+      activeProxies.push(proxy);
+      return proxy;
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") {
+        throw error;
+      }
+    }
+  }
+  throw new Error("no approved edge test port is available");
 }
 
 function firstStream(gateway: FakeGateway): FakeStream {
@@ -188,11 +217,13 @@ describe("LoopbackConnectProxy", () => {
           listenPort: -1,
           streamGateway: gateway
         })
-    ).toThrow("listenPort must be an integer between 0 and 65535");
+    ).toThrow("listenPort must be an integer between 8000 and 9000");
 
-    const proxy = createProxy(gateway);
-    expect(() => proxy.address()).toThrow("loopback proxy is not listening");
-    const firstAddress = await proxy.start();
+    const unstarted = createProxyAtPort(gateway, TEST_PORT_MIN);
+    expect(() => unstarted.address()).toThrow("loopback proxy is not listening");
+    await unstarted.stop();
+    const proxy = await startProxy(gateway);
+    const firstAddress = proxy.address();
     await expect(proxy.start()).resolves.toEqual(firstAddress);
     await proxy.stop();
     await proxy.stop();
@@ -200,8 +231,7 @@ describe("LoopbackConnectProxy", () => {
 
   it("仅在 agent opened 后回 200，并透明转发两个方向的字节", async () => {
     const gateway = new FakeGateway();
-    const proxy = createProxy(gateway);
-    await proxy.start();
+    const proxy = await startProxy(gateway);
     const capture = await request(proxy, CONNECT_REQUEST);
 
     await waitFor(() => gateway.streams.length === 1);
@@ -225,8 +255,7 @@ describe("LoopbackConnectProxy", () => {
 
   it("拒绝在 opened 前独立到达的 TCP 字节", async () => {
     const gateway = new FakeGateway();
-    const proxy = createProxy(gateway);
-    await proxy.start();
+    const proxy = await startProxy(gateway);
     const capture = await request(proxy, CONNECT_REQUEST);
 
     await waitFor(() => gateway.streams.length === 1);
@@ -244,15 +273,13 @@ describe("LoopbackConnectProxy", () => {
         throw new Error("gateway unavailable");
       }
     };
-    const throwingProxy = createProxy(throwingGateway);
-    await throwingProxy.start();
+    const throwingProxy = await startProxy(throwingGateway);
     const failedCapture = await request(throwingProxy, CONNECT_REQUEST);
     await waitFor(() => failedCapture.ended);
     expect(capturedText(failedCapture)).toContain("HTTP/1.1 502 Bad Gateway");
 
     const gateway = new FakeGateway();
-    const limitedProxy = createProxy(gateway, 100, 1);
-    await limitedProxy.start();
+    const limitedProxy = await startProxy(gateway, 100, 1);
     const firstCapture = await request(limitedProxy, CONNECT_REQUEST);
     await waitFor(() => gateway.streams.length === 1);
     const limitedCapture = await request(limitedProxy, CONNECT_REQUEST);
@@ -264,8 +291,7 @@ describe("LoopbackConnectProxy", () => {
 
   it("在 127.0.0.1 之外不接受连接", async () => {
     const gateway = new FakeGateway();
-    const proxy = createProxy(gateway);
-    await proxy.start();
+    const proxy = await startProxy(gateway);
     const socket = connect({ host: "127.0.0.2", port: proxy.address().port });
 
     const failure = await new Promise<Error>((resolve) => socket.once("error", resolve));
@@ -275,7 +301,7 @@ describe("LoopbackConnectProxy", () => {
 
   it("固定 IPv4 loopback 监听，且 CONNECT 机密不会进入运行日志", async () => {
     const gateway = new FakeGateway();
-    const proxy = createProxy(gateway);
+    const proxy = await startProxy(gateway);
     const consoleSpies = [
       vi.spyOn(console, "log"),
       vi.spyOn(console, "debug"),
@@ -285,7 +311,7 @@ describe("LoopbackConnectProxy", () => {
     ];
 
     try {
-      const address = await proxy.start();
+      const address = proxy.address();
       expect(address.host).toBe("127.0.0.1");
       await expectConnectionFailure("127.0.0.2", address.port);
       await expectConnectionFailure("::1", address.port);
@@ -312,8 +338,7 @@ describe("LoopbackConnectProxy", () => {
 
   it("拒绝普通 HTTP 方法，且不创建 stream", async () => {
     const gateway = new FakeGateway();
-    const proxy = createProxy(gateway);
-    await proxy.start();
+    const proxy = await startProxy(gateway);
     const capture = await request(proxy, "GET / HTTP/1.1\r\nHost: proxy.test\r\n\r\n");
 
     await waitFor(() => capture.ended);
@@ -323,8 +348,7 @@ describe("LoopbackConnectProxy", () => {
 
   it("在网关前拒绝错误 host、port、绝对 URL、IP literal 和认证头", async () => {
     const gateway = new FakeGateway();
-    const proxy = createProxy(gateway);
-    await proxy.start();
+    const proxy = await startProxy(gateway);
     const invalidRequests = [
       "CONNECT other.example:443 HTTP/1.1\r\n\r\n",
       `CONNECT ${DEFAULT_ALLOWED_DESTINATION.hostname}:444 HTTP/1.1\r\n\r\n`,
@@ -344,8 +368,7 @@ describe("LoopbackConnectProxy", () => {
 
   it("拒绝 body、upgrade 与 CONNECT header 后的额外字节", async () => {
     const gateway = new FakeGateway();
-    const proxy = createProxy(gateway);
-    await proxy.start();
+    const proxy = await startProxy(gateway);
     const invalidRequests = [
       `CONNECT ${DEFAULT_ALLOWED_DESTINATION.hostname}:443 HTTP/1.1\r\nContent-Length: 1\r\n\r\nx`,
       `CONNECT ${DEFAULT_ALLOWED_DESTINATION.hostname}:443 HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n`,
@@ -363,8 +386,7 @@ describe("LoopbackConnectProxy", () => {
 
   it("在 agent 拒绝时返回固定 502 并关闭未 opened stream", async () => {
     const gateway = new FakeGateway();
-    const proxy = createProxy(gateway);
-    await proxy.start();
+    const proxy = await startProxy(gateway);
     const capture = await request(proxy, CONNECT_REQUEST);
 
     await waitFor(() => gateway.streams.length === 1);
@@ -378,8 +400,7 @@ describe("LoopbackConnectProxy", () => {
 
   it("在 agent error 或已 opened stream 的 close 时清理对应本地连接", async () => {
     const errorGateway = new FakeGateway();
-    const errorProxy = createProxy(errorGateway);
-    await errorProxy.start();
+    const errorProxy = await startProxy(errorGateway);
     const errorCapture = await request(errorProxy, CONNECT_REQUEST);
 
     await waitFor(() => errorGateway.streams.length === 1);
@@ -390,8 +411,7 @@ describe("LoopbackConnectProxy", () => {
     expect(errorStream.closeCalls).toBe(1);
 
     const closeGateway = new FakeGateway();
-    const closeProxy = createProxy(closeGateway);
-    await closeProxy.start();
+    const closeProxy = await startProxy(closeGateway);
     const closeCapture = await request(closeProxy, CONNECT_REQUEST);
     await waitFor(() => closeGateway.streams.length === 1);
     const closeStream = firstStream(closeGateway);
@@ -404,8 +424,7 @@ describe("LoopbackConnectProxy", () => {
 
   it("拒绝 opened 前的 gateway data，并在双向背压恢复时继续转发", async () => {
     const gateway = new FakeGateway();
-    const proxy = createProxy(gateway);
-    await proxy.start();
+    const proxy = await startProxy(gateway);
     const rejectedCapture = await request(proxy, CONNECT_REQUEST);
     await waitFor(() => gateway.streams.length === 1);
     const rejectedStream = firstStream(gateway);
@@ -415,8 +434,7 @@ describe("LoopbackConnectProxy", () => {
     expect(rejectedStream.closeCalls).toBe(1);
 
     const forwardingGateway = new FakeGateway();
-    const forwardingProxy = createProxy(forwardingGateway);
-    await forwardingProxy.start();
+    const forwardingProxy = await startProxy(forwardingGateway);
     const capture = await request(forwardingProxy, CONNECT_REQUEST);
     await waitFor(() => forwardingGateway.streams.length === 1);
     const stream = firstStream(forwardingGateway);
@@ -443,8 +461,7 @@ describe("LoopbackConnectProxy", () => {
 
   it("在打开超时时返回固定 504 并清理 stream", async () => {
     const gateway = new FakeGateway();
-    const proxy = createProxy(gateway, 20);
-    await proxy.start();
+    const proxy = await startProxy(gateway, 20);
     const capture = await request(proxy, CONNECT_REQUEST);
 
     await waitFor(() => capture.ended);
@@ -454,8 +471,8 @@ describe("LoopbackConnectProxy", () => {
 
   it("停止会撤销 pending CONNECT、关闭监听器，且重复停止不会保留 socket", async () => {
     const gateway = new FakeGateway();
-    const proxy = createProxy(gateway);
-    const address = await proxy.start();
+    const proxy = await startProxy(gateway);
+    const address = proxy.address();
     const capture = await request(proxy, CONNECT_REQUEST);
 
     await waitFor(() => gateway.streams.length === 1);

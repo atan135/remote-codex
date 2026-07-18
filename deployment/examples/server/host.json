@@ -4,7 +4,6 @@
   "listenPort": 8443,
   "publicHostname": "tunnel.example.invalid",
   "allowedOrigins": [
-    "https://edge.example.invalid",
     "https://tunnel.example.invalid:8443"
   ],
   "tlsCertificatePath": "tls/fullchain.pem",

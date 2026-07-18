@@ -6,3 +6,4 @@ packages:
   - "ops"
   - "server-host"
   - "egress-agent-host"
+  - "edge-client-host"
