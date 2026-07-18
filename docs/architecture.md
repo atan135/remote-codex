@@ -35,6 +35,11 @@ capability 或 stream。server 分别对授权三元组、edge user、edge devic
 stream 数、缓冲字节和开流速率限制。server 不建立目标 TCP 连接，也不公开 SOCKS、HTTP
 CONNECT、通用 TCP 转发、管理 API、指标 HTTP endpoint 或 shell。
 
+生产由独立 `server-host` 进程组合 `ops` 受保护 bundle 与 `createTunnelServer`，直接终止入口
+TLS。唯一公开 URL 是 `wss://<publicHostname>:<8000-9000 内端口>/tunnel`；样例为 `8443`。
+证书通过预置流程或 DNS-01 续期并在 `SIGHUP` 后安全 reload，不为 ACME 或管理功能新增
+listener。host 配置、Origin 或资源限制变化必须重启，不能借 reload 放宽运行边界。
+
 peer 认证密钥、server capability 签名密钥、TLS 材料、部署配置和授权注册表必须分离。私钥
 只放在所属组件的受保护存储中；授权注册表是共享 agent 路由的唯一来源，不能由 CONNECT
 请求、WSS frame、edge 配置或 agent 配置改变。

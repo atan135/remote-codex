@@ -2,7 +2,7 @@ import { IdentityKeyRole, type IdentityKeyRole as IdentityKeyRoleType } from "@r
 
 import { fail } from "./errors.js";
 
-export const PRODUCTION_MANIFEST_SCHEMA_VERSION = 1 as const;
+export const PRODUCTION_MANIFEST_SCHEMA_VERSION = 2 as const;
 export const PEER_IDENTITY_REGISTRY_SCHEMA_VERSION = 1 as const;
 
 export interface PublicKeyFileReference<Role extends IdentityKeyRoleType = IdentityKeyRoleType> {
@@ -20,6 +20,7 @@ export interface ServerProductionManifest {
   readonly schemaVersion: typeof PRODUCTION_MANIFEST_SCHEMA_VERSION;
   readonly component: "server";
   readonly configPath: string;
+  readonly hostConfigPath: string;
   readonly peerIdentityRegistryPath: string;
   readonly authorizationRegistryPath: string;
   readonly capabilitySigningKey: PrivateKeyFileReference<typeof IdentityKeyRole.SERVER_CAPABILITY_SIGNING>;
@@ -179,11 +180,12 @@ export function parseProductionManifestJson(serialized: string): ProductionManif
   }
 
   if (record.component === "server") {
-    exactKeys(record, ["schemaVersion", "component", "configPath", "peerIdentityRegistryPath", "authorizationRegistryPath", "capabilitySigningKey"], "manifest");
+    exactKeys(record, ["schemaVersion", "component", "configPath", "hostConfigPath", "peerIdentityRegistryPath", "authorizationRegistryPath", "capabilitySigningKey"], "manifest");
     return Object.freeze({
       schemaVersion: PRODUCTION_MANIFEST_SCHEMA_VERSION,
       component: "server",
       configPath: relativePath(record, "configPath", "manifest"),
+      hostConfigPath: relativePath(record, "hostConfigPath", "manifest"),
       peerIdentityRegistryPath: relativePath(record, "peerIdentityRegistryPath", "manifest"),
       authorizationRegistryPath: relativePath(record, "authorizationRegistryPath", "manifest"),
       capabilitySigningKey: parsePublicKeyReference(record.capabilitySigningKey, "manifest.capabilitySigningKey", IdentityKeyRole.SERVER_CAPABILITY_SIGNING, true)

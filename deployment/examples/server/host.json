@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "listenHost": "0.0.0.0",
+  "listenPort": 8443,
+  "publicHostname": "tunnel.example.invalid",
+  "allowedOrigins": [
+    "https://edge.example.invalid",
+    "https://agent.example.invalid"
+  ],
+  "tlsCertificatePath": "tls/fullchain.pem",
+  "tlsPrivateKeyPath": "tls/private-key.pem",
+  "maxConnections": 256,
+  "listenBacklog": 128,
+  "shutdownTimeoutMs": 15000,
+  "metricsIntervalMs": 60000,
+  "transportLimits": {
+    "maxUpgradeHeaderBytes": 16384,
+    "maxUpgradeHeaderCount": 64,
+    "maxConcurrentHandshakes": 32,
+    "maxTrackedConnectionAddresses": 4096,
+    "maxConnectionsPerWindow": 30,
+    "connectionRateWindowMs": 60000,
+    "handshakeTimeoutMs": 10000,
+    "maxMessageBytes": 32768
+  }
+}

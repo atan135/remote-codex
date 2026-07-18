@@ -38,6 +38,7 @@ import {
 } from "./secure-files.js";
 import type { FileSecurityAdapter } from "./secure-files.js";
 import { parsePeerIdentityRegistryJson, parseProductionManifestJson } from "./schema.js";
+import { parseServerHostConfigJson } from "./server-host.js";
 
 const FAST_TEST_SECURITY: FileSecurityAdapter = Object.freeze({
   assertSecureFile: () => undefined,
@@ -171,9 +172,86 @@ describe("离线 CLI", () => {
 });
 
 describe("生产 manifest 与最小权限", () => {
+  it("严格限制 public server 的唯一 TLS listener 和传输资源", () => {
+    const valid = {
+      schemaVersion: 1,
+      listenHost: "0.0.0.0",
+      listenPort: 8443,
+      publicHostname: "tunnel.example.invalid",
+      allowedOrigins: ["https://edge.example.invalid", "https://agent.example.invalid"],
+      tlsCertificatePath: "tls/fullchain.pem",
+      tlsPrivateKeyPath: "tls/private-key.pem",
+      maxConnections: 256,
+      listenBacklog: 128,
+      shutdownTimeoutMs: 15_000,
+      metricsIntervalMs: 60_000,
+      transportLimits: {
+        maxUpgradeHeaderBytes: 16_384,
+        maxUpgradeHeaderCount: 64,
+        maxConcurrentHandshakes: 32,
+        maxTrackedConnectionAddresses: 4_096,
+        maxConnectionsPerWindow: 30,
+        connectionRateWindowMs: 60_000,
+        handshakeTimeoutMs: 10_000,
+        maxMessageBytes: 32_768
+      }
+    };
+    expect(parseServerHostConfigJson(JSON.stringify(valid))).toMatchObject({
+      listenHost: "0.0.0.0",
+      listenPort: 8443,
+      publicHostname: "tunnel.example.invalid"
+    });
+    expectOpsError(
+      () => parseServerHostConfigJson(JSON.stringify({ ...valid, listenPort: 443 })),
+      "OPS_SERVER_HOST_INTEGER_INVALID"
+    );
+    expectOpsError(
+      () => parseServerHostConfigJson(JSON.stringify({ ...valid, publicHostname: "127.0.0.1" })),
+      "OPS_SERVER_PUBLIC_HOSTNAME_INVALID"
+    );
+    expectOpsError(
+      () => parseServerHostConfigJson(JSON.stringify({ ...valid, publicHostname: "*.example.invalid" })),
+      "OPS_SERVER_PUBLIC_HOSTNAME_INVALID"
+    );
+    expectOpsError(
+      () => parseServerHostConfigJson(JSON.stringify({ ...valid, allowedOrigins: ["http://edge.example.invalid"] })),
+      "OPS_SERVER_ORIGIN_INVALID"
+    );
+    expectOpsError(
+      () => parseServerHostConfigJson(JSON.stringify({ ...valid, allowedOrigins: ["https://127.0.0.1"] })),
+      "OPS_SERVER_ORIGIN_INVALID"
+    );
+    expectOpsError(
+      () => parseServerHostConfigJson(JSON.stringify({ ...valid, listenHost: "127.0.0.1" })),
+      "OPS_SERVER_LISTEN_HOST_INVALID"
+    );
+    expectOpsError(
+      () => parseServerHostConfigJson(JSON.stringify({
+        ...valid,
+        transportLimits: { ...valid.transportLimits, maxConcurrentHandshakes: 33 }
+      })),
+      "OPS_SERVER_HOST_INTEGER_INVALID"
+    );
+    expectOpsError(
+      () => parseServerHostConfigJson(JSON.stringify({
+        ...valid,
+        transportLimits: { ...valid.transportLimits, connectionRateWindowMs: 1 }
+      })),
+      "OPS_SERVER_HOST_INTEGER_INVALID"
+    );
+    expect(parseServerHostConfigJson(JSON.stringify({
+      ...valid,
+      transportLimits: { ...valid.transportLimits, connectionRateWindowMs: 120_000 }
+    })).transportLimits.connectionRateWindowMs).toBe(120_000);
+    expectOpsError(
+      () => parseServerHostConfigJson(JSON.stringify({ ...valid, token: "must-not-be-accepted" })),
+      "OPS_UNKNOWN_FIELD"
+    );
+  });
+
   it("严格拒绝未知字段、角色错配和宽松路径", () => {
     const base = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       component: "egress-agent",
       serverId: "public-server-01",
       configPath: "config.json",
@@ -189,6 +267,10 @@ describe("生产 manifest 与最小权限", () => {
         publicKeyPath: "keys/server/public.pem"
       }
     };
+    expectOpsError(
+      () => parseProductionManifestJson(JSON.stringify({ ...base, schemaVersion: 1 })),
+      "OPS_MANIFEST_VERSION_MISMATCH"
+    );
     expectOpsError(() => parseProductionManifestJson(JSON.stringify({ ...base, token: "must-not-echo" })), "OPS_UNKNOWN_FIELD");
     expectOpsError(
       () => parseProductionManifestJson(JSON.stringify({ ...base, authenticationKey: { ...base.authenticationKey, role: IdentityKeyRole.EDGE_DEVICE_AUTHENTICATION } })),
@@ -327,13 +409,83 @@ describe("独立身份材料", () => {
 });
 
 describe("离线生产 bundle 校验", () => {
+  it("组合 server host、TLS、签名身份和授权材料", () => {
+    const root = temporaryRoot(true);
+    try {
+      const server = generateIdentityFiles({
+        rootDirectory: root,
+        outputDirectory: "server",
+        role: IdentityKeyRole.SERVER_CAPABILITY_SIGNING,
+        keyId: "server-key"
+      });
+      createOwnerOnlyDirectory(root, "tls");
+      writeNewFile(join(root, "tls/fullchain.pem"), "certificate", "public-readonly", FAST_TEST_SECURITY);
+      writeNewFile(join(root, "tls/private-key.pem"), "private-key", "owner-only", FAST_TEST_SECURITY);
+      writeOwnerFile(root, "manifest.json", {
+        schemaVersion: 2,
+        component: "server",
+        configPath: "config.json",
+        hostConfigPath: "host.json",
+        peerIdentityRegistryPath: "peer-identities.json",
+        authorizationRegistryPath: "authorizations.json",
+        capabilitySigningKey: {
+          role: server.role,
+          keyId: server.keyId,
+          publicKeyPath: server.publicKeyPath,
+          privateKeyPath: server.privateKeyPath
+        }
+      });
+      writeOwnerFile(root, "config.json", {
+        component: "server",
+        serverId: "server-01",
+        allowedDestination: DEFAULT_ALLOWED_DESTINATION
+      });
+      writeOwnerFile(root, "host.json", {
+        schemaVersion: 1,
+        listenHost: "0.0.0.0",
+        listenPort: 8443,
+        publicHostname: "tunnel.example.invalid",
+        allowedOrigins: ["https://edge.example.invalid"],
+        tlsCertificatePath: "tls/fullchain.pem",
+        tlsPrivateKeyPath: "tls/private-key.pem",
+        maxConnections: 256,
+        listenBacklog: 128,
+        shutdownTimeoutMs: 15_000,
+        metricsIntervalMs: 60_000,
+        transportLimits: {
+          maxUpgradeHeaderBytes: 16_384,
+          maxUpgradeHeaderCount: 64,
+          maxConcurrentHandshakes: 32,
+          maxTrackedConnectionAddresses: 4_096,
+          maxConnectionsPerWindow: 30,
+          connectionRateWindowMs: 60_000,
+          handshakeTimeoutMs: 10_000,
+          maxMessageBytes: 32_768
+        }
+      });
+      writeOwnerFile(root, "peer-identities.json", { schemaVersion: 1, identities: [] });
+      writeOwnerFile(root, "authorizations.json", { auditVersion: 1, authorizations: [] });
+
+      const loaded = loadProductionBundleWithSecurity(root, "manifest.json", {}, FAST_TEST_SECURITY);
+      expect(loaded).toMatchObject({
+        component: "server",
+        config: { serverId: "server-01" },
+        hostConfig: { listenHost: "0.0.0.0", listenPort: 8443 },
+        tls: { certificate: Buffer.from("certificate"), privateKey: Buffer.from("private-key") }
+      });
+      expect(JSON.stringify(loaded)).not.toContain("BEGIN PRIVATE KEY");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
   it("只加载 edge 所需材料，并拒绝批准范围外监听端口", () => {
     const root = temporaryRoot(true);
     try {
       const edge = generateIdentityFiles({ rootDirectory: root, outputDirectory: "edge", role: IdentityKeyRole.EDGE_DEVICE_AUTHENTICATION, keyId: "edge-key" });
       const server = generateIdentityFiles({ rootDirectory: root, outputDirectory: "server", role: IdentityKeyRole.SERVER_CAPABILITY_SIGNING, keyId: "server-key" });
       const manifest = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         component: "edge-client",
         serverId: "server-01",
         configPath: "config.json",

@@ -1,7 +1,8 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "component": "server",
   "configPath": "config.json",
+  "hostConfigPath": "host.json",
   "peerIdentityRegistryPath": "peer-identities.json",
   "authorizationRegistryPath": "authorizations.json",
   "capabilitySigningKey": {

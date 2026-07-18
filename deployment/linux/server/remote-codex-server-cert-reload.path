@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch Remote Codex TLS certificate files
+
+[Path]
+PathChanged=/etc/remote-codex/server/tls/fullchain.pem
+PathChanged=/etc/remote-codex/server/tls/private-key.pem
+Unit=remote-codex-server-cert-reload.service
+
+[Install]
+WantedBy=multi-user.target

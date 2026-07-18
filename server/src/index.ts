@@ -61,5 +61,14 @@ export {
   type AuthorizationStatus as AuthorizationStatusType
 } from "./authorization-registry.js";
 
+export {
+  ConnectionRateTracker,
+  MAX_CONNECTION_RATE_WINDOW_MS,
+  MIN_CONNECTION_RATE_WINDOW_MS,
+  type ConnectionRateDecision,
+  type ConnectionRateTrackerLimits,
+  type ConnectionRateTrackerScheduler
+} from "./connection-rate-tracker.js";
+
 export const packageName = "@remote-codex/server" as const;
 export const sharedProtocolVersion: ServerConfig["protocolVersion"] = PROTOCOL_VERSION;

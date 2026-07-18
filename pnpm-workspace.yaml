@@ -4,3 +4,4 @@ packages:
   - "edge-client"
   - "shared"
   - "ops"
+  - "server-host"

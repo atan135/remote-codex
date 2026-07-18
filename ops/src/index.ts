@@ -7,6 +7,11 @@ export {
 } from "./authorization-files.js";
 export { generateIdentityFiles, type GeneratedIdentityFiles } from "./identity-files.js";
 export {
+  parseServerHostConfigJson,
+  SERVER_HOST_CONFIG_SCHEMA_VERSION,
+  type ServerHostConfig
+} from "./server-host.js";
+export {
   loadPeerIdentityRegistry,
   loadProductionBundle,
   PRODUCTION_LISTEN_PORT_MAX,

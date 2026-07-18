@@ -1,0 +1,45 @@
+[Unit]
+Description=Remote Codex public WSS relay
+Documentation=file:/opt/remote-codex/current/docs/operations/public-server-deployment.md
+Wants=network-online.target time-sync.target
+After=network-online.target time-sync.target
+
+[Service]
+Type=simple
+User=remote-codex
+Group=remote-codex
+WorkingDirectory=/opt/remote-codex/current
+ExecStartPre=/usr/bin/node /opt/remote-codex/current/ops/dist/cli-main.js deployment validate --root /etc/remote-codex/server --manifest manifest.json
+ExecStart=/usr/bin/node /opt/remote-codex/current/server-host/dist/cli-main.js --root /etc/remote-codex/server --manifest manifest.json
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+TimeoutStopSec=20s
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/etc/remote-codex/server
+LimitNOFILE=4096
+TasksMax=128
+MemoryMax=512M
+CPUQuota=100%
+OOMPolicy=stop
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=remote-codex-server
+
+[Install]
+WantedBy=multi-user.target

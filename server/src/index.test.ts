@@ -1,7 +1,6 @@
 import { once } from "node:events";
 import { get as httpGet } from "node:http";
 import { get, request } from "node:https";
-import type { AddressInfo } from "node:net";
 
 import selfsigned from "selfsigned";
 import WebSocket from "ws";
@@ -16,6 +15,7 @@ import {
   type TlsCredentials,
   type TunnelServer
 } from "./index.js";
+import { listenOnApprovedTestPort } from "./test-port-helper.js";
 
 const TEST_ORIGIN = "https://edge.example.test";
 let testTlsCredentials: TlsCredentials;
@@ -58,10 +58,8 @@ async function startServer(maxMessageBytes = 64): Promise<string> {
       maxUpgradeHeaderBytes: 4 * 1024
     }
   });
-  runningServer.httpsServer.listen(0, "127.0.0.1");
-  await once(runningServer.httpsServer, "listening");
-  const address = runningServer.httpsServer.address() as AddressInfo;
-  return `wss://127.0.0.1:${address.port}`;
+  const port = await listenOnApprovedTestPort(runningServer.httpsServer);
+  return `wss://127.0.0.1:${port}`;
 }
 
 function openSocket(url: string, headers: Record<string, string> = {}): Promise<WebSocket> {
@@ -137,6 +135,14 @@ describe("受限 HTTPS/WSS 入口", () => {
         }
       })
     ).toThrow("SERVER_AUTHORIZATION_EDGE_DEVICE_UNKNOWN");
+  });
+
+  it("直接 runtime 也拒绝会放宽连接速率的过短窗口", () => {
+    expect(() => createTunnelServer({
+      tls: testTlsCredentials,
+      allowedOrigins: [TEST_ORIGIN],
+      limits: { connectionRateWindowMs: 1 }
+    })).toThrow("SERVER_TRANSPORT_LIMIT_CONNECTION_RATE_WINDOW_INVALID");
   });
 
   it("仅在独立健康检查端点返回固定状态", async () => {

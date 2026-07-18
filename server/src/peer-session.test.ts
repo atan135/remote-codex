@@ -1,6 +1,4 @@
-import { once } from "node:events";
 import { generateKeyPairSync } from "node:crypto";
-import type { AddressInfo } from "node:net";
 
 import {
   connectionFrame,
@@ -39,6 +37,7 @@ import {
   type TlsCredentials,
   type TunnelServer
 } from "./index.js";
+import { listenOnApprovedTestPort } from "./test-port-helper.js";
 
 const TEST_ORIGIN = "https://edge.example.test";
 let testTlsCredentials: TlsCredentials;
@@ -153,10 +152,8 @@ async function startServer(
     authenticationTimeoutMs: 500,
     ...overrides
   });
-  runningServer.httpsServer.listen(0, "127.0.0.1");
-  await once(runningServer.httpsServer, "listening");
-  const address = runningServer.httpsServer.address() as AddressInfo;
-  return `wss://127.0.0.1:${address.port}`;
+  const port = await listenOnApprovedTestPort(runningServer.httpsServer);
+  return `wss://127.0.0.1:${port}`;
 }
 
 function openSocket(url: string): Promise<WebSocket> {

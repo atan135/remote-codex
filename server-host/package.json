@@ -1,5 +1,5 @@
 {
-  "name": "@remote-codex/ops",
+  "name": "@remote-codex/server-host",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -7,7 +7,7 @@
     "dist"
   ],
   "bin": {
-    "remote-codex-ops": "./dist/cli-main.js"
+    "remote-codex-server": "./dist/cli-main.js"
   },
   "exports": {
     ".": {
@@ -16,13 +16,13 @@
     }
   },
   "dependencies": {
-    "@remote-codex/server": "workspace:*",
-    "@remote-codex/shared": "workspace:*"
+    "@remote-codex/ops": "workspace:*",
+    "@remote-codex/server": "workspace:*"
   },
   "scripts": {
     "lint": "eslint src --max-warnings=0",
     "typecheck": "tsc --project tsconfig.json --noEmit",
-    "pretest": "corepack pnpm --filter @remote-codex/shared build && corepack pnpm --filter @remote-codex/server build",
+    "pretest": "corepack pnpm --filter @remote-codex/shared build && corepack pnpm --filter @remote-codex/server build && corepack pnpm --filter @remote-codex/ops build",
     "test": "vitest run --coverage",
     "build": "tsc --project tsconfig.json"
   }

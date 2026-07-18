@@ -1,0 +1,11 @@
+[Unit]
+Description=Reload Remote Codex TLS certificate safely
+After=remote-codex-server.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl kill --kill-whom=main --signal=HUP remote-codex-server.service
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true

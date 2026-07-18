@@ -20,6 +20,11 @@ import {
 import { StreamOpenCoordinator } from "./stream-open.js";
 import type { StreamAuditLogger, StreamMetricsSnapshot } from "./observability.js";
 import type { StreamQuotaLimits } from "./stream-open.js";
+import {
+  ConnectionRateTracker,
+  MAX_CONNECTION_RATE_WINDOW_MS,
+  MIN_CONNECTION_RATE_WINDOW_MS
+} from "./connection-rate-tracker.js";
 
 export const HEALTH_CHECK_PATH = "/health" as const;
 export const TUNNEL_WEBSOCKET_PATH = "/tunnel" as const;
@@ -38,6 +43,7 @@ export interface ServerTransportLimits {
   readonly maxUpgradeHeaderBytes: number;
   readonly maxUpgradeHeaderCount: number;
   readonly maxConcurrentHandshakes: number;
+  readonly maxTrackedConnectionAddresses: number;
   readonly maxConnectionsPerWindow: number;
   readonly connectionRateWindowMs: number;
   readonly handshakeTimeoutMs: number;
@@ -48,6 +54,7 @@ export const DEFAULT_SERVER_TRANSPORT_LIMITS: ServerTransportLimits = Object.fre
   maxUpgradeHeaderBytes: 16 * 1024,
   maxUpgradeHeaderCount: 64,
   maxConcurrentHandshakes: 32,
+  maxTrackedConnectionAddresses: 4_096,
   maxConnectionsPerWindow: 30,
   connectionRateWindowMs: 60_000,
   handshakeTimeoutMs: 10_000,
@@ -103,10 +110,6 @@ export class ServerStartupError extends Error {
   }
 }
 
-interface ConnectionRateRecord {
-  readonly timestamps: number[];
-}
-
 function startupFailure(code: string): never {
   throw new ServerStartupError(code);
 }
@@ -137,6 +140,12 @@ function resolveTransportLimits(
 
   if (limits.maxUpgradeHeaderBytes < 512) {
     startupFailure("SERVER_TRANSPORT_LIMIT_HEADER_BYTES_TOO_SMALL");
+  }
+  if (
+    limits.connectionRateWindowMs < MIN_CONNECTION_RATE_WINDOW_MS ||
+    limits.connectionRateWindowMs > MAX_CONNECTION_RATE_WINDOW_MS
+  ) {
+    startupFailure("SERVER_TRANSPORT_LIMIT_CONNECTION_RATE_WINDOW_INVALID");
   }
 
   return Object.freeze(limits);
@@ -349,7 +358,7 @@ export function createTunnelServer(options: TunnelServerOptions): TunnelServer {
           )
         );
   streamExpirationTimer?.unref();
-  const connectionRates = new Map<string, ConnectionRateRecord>();
+  const connectionRates = new ConnectionRateTracker(limits);
   let pendingHandshakes = 0;
 
   webSocketServer.on("connection", (socket: WebSocket) => {
@@ -383,20 +392,16 @@ export function createTunnelServer(options: TunnelServerOptions): TunnelServer {
       return;
     }
 
-    const now = Date.now();
     const connectionKey = request.socket.remoteAddress ?? "unknown";
-    const existingRate = connectionRates.get(connectionKey);
-    const recentTimestamps = (existingRate?.timestamps ?? []).filter(
-      (timestamp) => now - timestamp < limits.connectionRateWindowMs
-    );
-
-    if (recentTimestamps.length >= limits.maxConnectionsPerWindow) {
+    const connectionRateDecision = connectionRates.record(connectionKey);
+    if (connectionRateDecision === "address-capacity-exceeded") {
+      rejectUpgrade(socket, 503);
+      return;
+    }
+    if (connectionRateDecision === "rate-exceeded") {
       rejectUpgrade(socket, 429);
       return;
     }
-
-    recentTimestamps.push(now);
-    connectionRates.set(connectionKey, { timestamps: recentTimestamps });
 
     if (pendingHandshakes >= limits.maxConcurrentHandshakes) {
       rejectUpgrade(socket, 503);
@@ -427,6 +432,7 @@ export function createTunnelServer(options: TunnelServerOptions): TunnelServer {
       if (streamExpirationTimer !== undefined) {
         clearInterval(streamExpirationTimer);
       }
+      connectionRates.close();
       streamOpenCoordinator?.close();
       peerSessions.close();
       webSocketServer.close();

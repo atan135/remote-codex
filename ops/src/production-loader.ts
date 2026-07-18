@@ -28,6 +28,7 @@ import {
 
 import { fail } from "./errors.js";
 import { readDeploymentFileWithSecurity, type FileSecurityAdapter } from "./secure-files.js";
+import { parseServerHostConfigJson, type ServerHostConfig } from "./server-host.js";
 import {
   parsePeerIdentityRegistryJson,
   parseProductionManifestJson,
@@ -42,6 +43,11 @@ export const PRODUCTION_LISTEN_PORT_MAX = 9_000;
 export interface LoadedServerProductionBundle {
   readonly component: "server";
   readonly config: ServerConfig;
+  readonly hostConfig: ServerHostConfig;
+  readonly tls: {
+    readonly certificate: Buffer;
+    readonly privateKey: Buffer;
+  };
   readonly signingCredentials: ServerSigningCredentials;
   readonly peerIdentities: readonly ServerPeerIdentityRegistration[];
   readonly authorizationDocument: AuthorizationRegistryDocument;
@@ -201,6 +207,21 @@ function loadServerBundle(
     return fail("OPS_CONFIG_COMPONENT_MISMATCH", manifest.configPath);
   }
   validateConfiguredDestination(parsedConfig);
+  const hostConfig = parseServerHostConfigJson(
+    readDeploymentFileWithSecurity(rootDirectory, manifest.hostConfigPath, "owner-only", adapter)
+  );
+  if (hostConfig.transportLimits.maxMessageBytes < parsedConfig.limits.maxFramePayloadBytes + 256) {
+    return fail("OPS_SERVER_MESSAGE_LIMIT_TOO_SMALL", manifest.hostConfigPath);
+  }
+  const certificate = Buffer.from(
+    readDeploymentFileWithSecurity(rootDirectory, hostConfig.tlsCertificatePath, "public-readonly", adapter)
+  );
+  const tlsPrivateKey = Buffer.from(
+    readDeploymentFileWithSecurity(rootDirectory, hostConfig.tlsPrivateKeyPath, "owner-only", adapter)
+  );
+  if (certificate.byteLength === 0 || tlsPrivateKey.byteLength === 0) {
+    return fail("OPS_SERVER_TLS_CREDENTIALS_EMPTY", manifest.hostConfigPath);
+  }
   const publicKey = createIdentityPublicKey(
     manifest.capabilitySigningKey,
     loadPublicKey(rootDirectory, manifest.capabilitySigningKey, adapter)
@@ -219,6 +240,8 @@ function loadServerBundle(
   return Object.freeze({
     component: "server",
     config: parsedConfig,
+    hostConfig,
+    tls: Object.freeze({ certificate, privateKey: tlsPrivateKey }),
     signingCredentials,
     peerIdentities,
     authorizationDocument

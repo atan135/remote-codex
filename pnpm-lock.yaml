@@ -81,6 +81,15 @@ importers:
         specifier: 2.4.1
         version: 2.4.1
 
+  server-host:
+    dependencies:
+      '@remote-codex/ops':
+        specifier: workspace:*
+        version: link:../ops
+      '@remote-codex/server':
+        specifier: workspace:*
+        version: link:../server
+
   shared: {}
 
 packages:
