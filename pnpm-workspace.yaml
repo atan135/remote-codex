@@ -3,3 +3,4 @@ packages:
   - "egress-agent"
   - "edge-client"
   - "shared"
+  - "ops"

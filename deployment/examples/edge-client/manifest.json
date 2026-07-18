@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "component": "edge-client",
+  "serverId": "public-server-01",
+  "configPath": "config.json",
+  "authenticationKey": {
+    "role": "edge-device-authentication",
+    "keyId": "edge-device-01-2026-01",
+    "publicKeyPath": "keys/authentication/public.pem",
+    "privateKeyPath": "keys/authentication/private.pem"
+  },
+  "serverCapabilityVerificationKey": {
+    "role": "server-capability-signing",
+    "keyId": "server-signing-2026-01",
+    "publicKeyPath": "server-keys/capability/public.pem"
+  }
+}

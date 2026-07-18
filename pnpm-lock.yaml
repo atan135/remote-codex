@@ -56,6 +56,15 @@ importers:
         specifier: 8.5.14
         version: 8.5.14
 
+  ops:
+    dependencies:
+      '@remote-codex/server':
+        specifier: workspace:*
+        version: link:../server
+      '@remote-codex/shared':
+        specifier: workspace:*
+        version: link:../shared
+
   server:
     dependencies:
       '@remote-codex/shared':

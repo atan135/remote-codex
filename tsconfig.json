@@ -4,6 +4,7 @@
     { "path": "./shared" },
     { "path": "./server" },
     { "path": "./egress-agent" },
-    { "path": "./edge-client" }
+    { "path": "./edge-client" },
+    { "path": "./ops" }
   ]
 }

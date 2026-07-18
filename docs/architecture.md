@@ -85,9 +85,9 @@ capability、私钥或证书正文。
 
 配置解析只接受 `wss:` server URL，拒绝 URL 中的凭据、查询和 fragment，且 TLS 校验不能
 被 `NODE_TLS_REJECT_UNAUTHORIZED=0` 禁用。配置样例见
-[configuration-example.md](configuration-example.md)。运行时库没有部署 CLI；受控宿主必须
-分别创建 server、agent runtime、edge runtime 和 `LoopbackConnectProxy`，并先使 edge runtime
-在线，再监听本地 CONNECT 端口。
+[configuration-example.md](configuration-example.md)。`@remote-codex/ops` 只提供离线生产文件、
+身份和授权操作，不是运行时启动器；受控宿主仍必须分别创建 server、agent runtime、edge
+runtime 和 `LoopbackConnectProxy`，并先使 edge runtime 在线，再监听本地 CONNECT 端口。
 
 网络功能验收必须证明：
 

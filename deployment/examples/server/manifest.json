@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "component": "server",
+  "configPath": "config.json",
+  "peerIdentityRegistryPath": "peer-identities.json",
+  "authorizationRegistryPath": "authorizations.json",
+  "capabilitySigningKey": {
+    "role": "server-capability-signing",
+    "keyId": "server-signing-2026-01",
+    "publicKeyPath": "keys/server-signing/public.pem",
+    "privateKeyPath": "keys/server-signing/private.pem"
+  }
+}

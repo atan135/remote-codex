@@ -1,0 +1,8 @@
+{
+  "component": "server",
+  "serverId": "public-server-01",
+  "allowedDestination": {
+    "hostname": "gateway.example.invalid",
+    "port": 443
+  }
+}

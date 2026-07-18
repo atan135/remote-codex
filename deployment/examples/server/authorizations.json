@@ -1,0 +1,17 @@
+{
+  "auditVersion": 1,
+  "authorizations": [
+    {
+      "edgeUserId": "edge-user-01",
+      "edgeDeviceId": "edge-device-01",
+      "agentId": "company-agent-01",
+      "status": "active",
+      "quota": {
+        "maxConcurrentStreams": 4,
+        "maxBufferedBytes": 1048576
+      },
+      "createdAtMs": 1784332800000,
+      "auditVersion": 1
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "identities": [
+    {
+      "kind": "egress-agent",
+      "agentId": "company-agent-01",
+      "authenticationKey": {
+        "role": "egress-agent-authentication",
+        "keyId": "agent-01-2026-01",
+        "publicKeyPath": "peer-keys/agent-01/public.pem"
+      }
+    },
+    {
+      "kind": "edge-device",
+      "edgeUserId": "edge-user-01",
+      "edgeDeviceId": "edge-device-01",
+      "authenticationKey": {
+        "role": "edge-device-authentication",
+        "keyId": "edge-device-01-2026-01",
+        "publicKeyPath": "peer-keys/edge-device-01/public.pem"
+      }
+    }
+  ]
+}

@@ -5,6 +5,10 @@
 capability 都不能写入这些 JSON 文件、`serverUrl` 或日志；它们必须由各组件独立的受保护
 存储和受控运行时输入提供。
 
+生产部署还必须用严格 manifest 指定每个组件可读取的身份材料。无秘密样例见
+`deployment/examples/`，离线校验与权限要求见
+[生产配置、身份与授权操作](operations/identity-and-authorization.md)。
+
 以下 `limits` 均只会收紧共享库默认上限。实际部署还必须分别向 server 注入 TLS、peer
 公钥身份、capability 签名身份和授权注册表。
 

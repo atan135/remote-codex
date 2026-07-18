@@ -1,0 +1,12 @@
+{
+  "component": "edge-client",
+  "edgeUserId": "edge-user-01",
+  "edgeDeviceId": "edge-device-01",
+  "serverUrl": "wss://tunnel.example.invalid/tunnel",
+  "listenHost": "127.0.0.1",
+  "listenPort": 8787,
+  "allowedDestination": {
+    "hostname": "gateway.example.invalid",
+    "port": 443
+  }
+}

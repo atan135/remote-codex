@@ -1,30 +1,28 @@
 {
-  "name": "@remote-codex/server",
+  "name": "@remote-codex/ops",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "files": [
     "dist"
   ],
+  "bin": {
+    "remote-codex-ops": "./dist/cli-main.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     }
   },
-  "types": "./dist/index.d.ts",
   "dependencies": {
-    "@remote-codex/shared": "workspace:*",
-    "ws": "8.18.3"
+    "@remote-codex/server": "workspace:*",
+    "@remote-codex/shared": "workspace:*"
   },
   "scripts": {
     "lint": "eslint src --max-warnings=0",
-    "typecheck": "tsc --project tsconfig.json --noEmit && tsc --project ../integration/tsconfig.json --noEmit",
+    "typecheck": "tsc --project tsconfig.json --noEmit",
     "test": "vitest run --coverage",
     "build": "tsc --project tsconfig.json"
-  },
-  "devDependencies": {
-    "@types/ws": "8.5.14",
-    "selfsigned": "2.4.1"
   }
 }
