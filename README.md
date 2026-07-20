@@ -81,6 +81,30 @@ Windows Edge Client 的独立设备材料、最低权限登录任务、会话级
 所有运维入口见[运维文档索引](docs/operations/README.md)；版本化 production allowlist、逐文件
 SHA-256 inventory、升级顺序和安全回滚见[发布、升级与回滚](docs/operations/release-and-rollback.md)。
 
+## 源码联调启动
+
+为三台机器从同一受控 Git commit 进行前台联调，根 `package.json` 提供以下快捷命令：
+
+```powershell
+$env:REMOTE_CODEX_CONFIG_ROOT = "C:\RemoteCodex\server-test"
+corepack pnpm start:server
+
+$env:REMOTE_CODEX_CONFIG_ROOT = "$env:LOCALAPPDATA\RemoteCodex\egress-agent-test"
+corepack pnpm start:agent
+
+$env:REMOTE_CODEX_CONFIG_ROOT = "$env:LOCALAPPDATA\RemoteCodex\edge-client-test"
+corepack pnpm start:edge
+```
+
+Linux 上使用相同的 `REMOTE_CODEX_CONFIG_ROOT` 和 `corepack pnpm start:server` 命令。每个 `start:*`
+都会先构建 workspace，再以前台子进程启动对应的 host CLI；`Ctrl+C` 会转发给该进程。可选的
+`REMOTE_CODEX_MANIFEST` 只用于指定配置根内的 manifest 文件名，默认是 `manifest.json`。
+
+配置根必须位于仓库外，且在启动前已通过 `ops deployment validate`；其中包含该角色的 manifest、
+配置、独立身份材料和必要公钥。Server 还需要 TLS 材料、peer registry 与授权注册表。快捷命令不
+创建身份、不生成配置、不放宽 TLS、目标验证或 listener 约束，也不替代正式 release、systemd 或
+Windows 当前用户任务部署。
+
 ## Codex 接入
 
 在启动 edge runtime 和本地代理后，将当前 PowerShell 会话的 `HTTPS_PROXY` 指向实际

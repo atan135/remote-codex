@@ -9,13 +9,19 @@
     "pnpm": ">=10 <11"
   },
   "scripts": {
-    "lint": "corepack pnpm --recursive --if-present run lint",
+    "lint": "eslint scripts --max-warnings=0 && corepack pnpm --recursive --if-present run lint",
     "typecheck": "corepack pnpm --recursive --if-present run typecheck",
     "test": "corepack pnpm --recursive --if-present run test",
     "test:without-e2e": "corepack pnpm build && corepack pnpm run test:without-e2e:built",
     "test:without-e2e:built": "corepack pnpm --recursive --workspace-concurrency=1 --if-present run test:without-e2e",
     "test:coverage": "vitest run --coverage --config vitest.coverage.config.ts",
     "build": "tsc --build",
+    "prestart:server": "corepack pnpm build",
+    "start:server": "node scripts/start-host.mjs server",
+    "prestart:agent": "corepack pnpm build",
+    "start:agent": "node scripts/start-host.mjs agent",
+    "prestart:edge": "corepack pnpm build",
+    "start:edge": "node scripts/start-host.mjs edge",
     "verify:repository-without-e2e": "corepack pnpm lint && corepack pnpm build && corepack pnpm typecheck && corepack pnpm test:without-e2e:built",
     "clean": "tsc --build --clean"
   },
