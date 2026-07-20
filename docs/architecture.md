@@ -48,6 +48,8 @@ session。Server 根据 active
 `(edgeUserId, edgeDeviceId) -> agentId` ACL 选择 Agent，并为每条 stream 签发短期、一次消费且
 绑定 user/device/agent/stream/destination 的 capability。Agent 是最终执行点：先验 capability，
 再按自身 allowlist 验证 hostname:443，最后才拨号。
+Agent 只容忍 capability 的签发时间最多快于本机 5 秒，且仍严格拒绝过期、签名或绑定无效的
+capability。
 
 ## Server 与共享授权
 

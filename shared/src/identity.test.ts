@@ -318,7 +318,7 @@ describe("short-lived stream capability", () => {
     expect(verifyCapability(input)).toEqual({ ok: false, errorCode: TunnelErrorCode.CAPABILITY_INVALID });
   });
 
-  it("rejects signature tampering, expiration, and capability issued in the future", () => {
+  it("rejects signature tampering, expiration, and capability issued over five seconds in the future", () => {
     const { serverCredentials, serverIdentity } = createFixture();
     const expectedBinding = binding();
     const capability = issueCapability({
@@ -356,6 +356,23 @@ describe("short-lived stream capability", () => {
       verifyCapability({
         ...baseInput,
         capability: futureCapability,
+        replayProtector: new CapabilityReplayProtector(),
+        nowMs: NOW_MS
+      })
+    ).toMatchObject({ ok: true, capability: { binding: expectedBinding } });
+
+    const tooFarFutureCapability = issueCapability({
+      credentials: serverCredentials,
+      binding: expectedBinding,
+      allowedDestination: DEFAULT_ALLOWED_DESTINATION,
+      nowMs: NOW_MS + 5_001,
+      ttlMs: 100,
+      randomBytes: deterministicBytes(61)
+    });
+    expect(
+      verifyCapability({
+        ...baseInput,
+        capability: tooFarFutureCapability,
         replayProtector: new CapabilityReplayProtector(),
         nowMs: NOW_MS
       })

@@ -34,6 +34,7 @@ export const CAPABILITY_SIGNATURE_BYTES = 64;
 export const CAPABILITY_HEADER_BYTES = 56;
 export const MAX_AUTHENTICATION_WINDOW_MS = 60_000;
 export const MAX_CAPABILITY_WINDOW_MS = 60_000;
+const MAX_CAPABILITY_CLOCK_SKEW_MS = 5_000;
 export const MAX_IDENTITY_ID_BYTES = 128;
 export const MAX_REPLAY_ENTRIES = 65_536;
 
@@ -590,7 +591,7 @@ function capabilityTimeIsValid(issuedAtMs: number, expiresAtMs: number, nowMs: n
     issuedAtMs >= 0 &&
     expiresAtMs > issuedAtMs &&
     expiresAtMs - issuedAtMs <= MAX_CAPABILITY_WINDOW_MS &&
-    issuedAtMs <= nowMs &&
+    issuedAtMs - nowMs <= MAX_CAPABILITY_CLOCK_SKEW_MS &&
     nowMs < expiresAtMs
   );
 }
