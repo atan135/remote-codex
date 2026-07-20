@@ -46,6 +46,8 @@ Edge device 与 Egress Agent 各自用独立 Ed25519 身份响应 Server challen
 active user/device -> agent ACL 授权每条 stream，再用独立 signing key 签发短期、一次消费且精确
 绑定 user、device、agent、stream ID、hostname:443 的 capability。Agent 在 TCP 拨号前验证签名、
 有效期、绑定与本地 allowlist，因而 Server 端验证不是最终执行点。
+Agent 对 Server 签名的认证 challenge 仅容忍最多 5 秒的本机时钟偏差；Server 仍以自身时钟执行
+有效期和重放校验。
 
 ## 启动前置条件
 

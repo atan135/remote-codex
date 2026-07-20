@@ -43,7 +43,8 @@ Nginx 是唯一公网 listener，通常使用 `443`；Node server-host 只能绑
 
 Edge device、Egress Agent、Server capability signing 使用三个分离的 Ed25519 key role。peer 先
 发送角色、ID 与注册 nonce，Server 返回带签发/过期时间的 challenge；peer 对完整签名输入响应，
-Server 校验公钥注册和 replay 后才认证 session。Server 根据 active
+Agent 只容忍最多 5 秒的本机时钟偏差，Server 校验公钥注册、challenge 有效期和 replay 后才认证
+session。Server 根据 active
 `(edgeUserId, edgeDeviceId) -> agentId` ACL 选择 Agent，并为每条 stream 签发短期、一次消费且
 绑定 user/device/agent/stream/destination 的 capability。Agent 是最终执行点：先验 capability，
 再按自身 allowlist 验证 hostname:443，最后才拨号。

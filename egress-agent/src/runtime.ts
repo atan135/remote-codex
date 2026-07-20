@@ -32,6 +32,7 @@ import {
 
 const WEBSOCKET_CLOSE_CODE_PROTOCOL = 1002;
 const AUTHENTICATION_FAILURE_CODES = new Set(["AUTH_FAILED", "AUTH_EXPIRED", "AUTH_REPLAYED", "AUTH_UNAUTHORIZED"]);
+const MAX_CHALLENGE_CLOCK_SKEW_MS = 5_000;
 
 export type EgressAgentState = "offline" | "connecting" | "authenticating" | "online" | "backoff" | "stopped";
 
@@ -465,7 +466,11 @@ export class EgressAgentRuntime {
 
       if (frame.type === FrameType.CHALLENGE && connection.phase === "awaiting-challenge") {
         const challengePayload = decodeChallengePayload(frame.payload);
-        if (challengePayload.issuedAtMs > this.now() || challengePayload.expiresAtMs <= this.now()) {
+        const nowMs = this.now();
+        if (
+          challengePayload.issuedAtMs - nowMs > MAX_CHALLENGE_CLOCK_SKEW_MS ||
+          nowMs - challengePayload.expiresAtMs >= MAX_CHALLENGE_CLOCK_SKEW_MS
+        ) {
           throw new EgressAgentRuntimeError("AUTH_EXPIRED");
         }
 

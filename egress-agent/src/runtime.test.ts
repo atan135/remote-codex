@@ -668,7 +668,7 @@ describe("egress agent persistent WSS session", () => {
       ...createIdentity(),
       origin: "https://agent.example.test",
       socketFactory: sockets,
-      now: () => 1_000,
+      now: () => 10_000,
       random: () => 1
     });
 
@@ -693,7 +693,7 @@ describe("egress agent persistent WSS session", () => {
     if (secondSocket === undefined) {
       throw new Error("expected the replacement socket");
     }
-    authenticate(secondSocket, 1_000);
+    authenticate(secondSocket, 10_000);
     const policy = runtime.getLocalPolicy();
     secondSocket.emitMessage(undefined, false);
     expect(runtime.getStatus()).toEqual({
@@ -708,11 +708,62 @@ describe("egress agent persistent WSS session", () => {
     if (thirdSocket === undefined) {
       throw new Error("expected the next socket");
     }
-    authenticate(thirdSocket, 1_000);
+    authenticate(thirdSocket, 10_000);
     thirdSocket.emitMessage(
       encodeFrame(streamFrame(FrameType.STREAM_OPENED, Uint8Array.from({ length: 16 }, () => 1), new Uint8Array()))
     );
     expect(runtime.getStatus().lastErrorCode).toBe("PROTOCOL_VIOLATION");
+  });
+
+  it("仅容忍五秒内的 Server challenge 时钟偏差", () => {
+    const localNowMs = 1_000;
+    const acceptedSockets = new FakeSocketFactory();
+    const acceptedRuntime = new EgressAgentRuntime({
+      config: createConfig(),
+      ...createIdentity(),
+      origin: "https://agent.example.test",
+      socketFactory: acceptedSockets,
+      now: () => localNowMs
+    });
+    acceptedRuntime.start();
+    const acceptedSocket = acceptedSockets.sockets[0];
+    if (acceptedSocket === undefined) {
+      throw new Error("expected accepted socket");
+    }
+    acceptedSocket.emitOpen();
+    const acceptedChallenge = issueAuthenticationChallenge({
+      nowMs: localNowMs + 5_000,
+      ttlMs: 100,
+      randomBytes: (size) => Uint8Array.from({ length: size }, () => 1)
+    });
+    acceptedSocket.emitMessage(
+      encodeFrame(connectionFrame(FrameType.CHALLENGE, encodeChallengePayload(acceptedChallenge.payload)))
+    );
+    expect(latestFrame(acceptedSocket).type).toBe(FrameType.AUTHENTICATE);
+
+    const rejectedSockets = new FakeSocketFactory();
+    const rejectedRuntime = new EgressAgentRuntime({
+      config: createConfig(),
+      ...createIdentity(),
+      origin: "https://agent.example.test",
+      socketFactory: rejectedSockets,
+      now: () => localNowMs
+    });
+    rejectedRuntime.start();
+    const rejectedSocket = rejectedSockets.sockets[0];
+    if (rejectedSocket === undefined) {
+      throw new Error("expected rejected socket");
+    }
+    rejectedSocket.emitOpen();
+    const rejectedChallenge = issueAuthenticationChallenge({
+      nowMs: localNowMs + 5_001,
+      ttlMs: 100,
+      randomBytes: (size) => Uint8Array.from({ length: size }, () => 1)
+    });
+    rejectedSocket.emitMessage(
+      encodeFrame(connectionFrame(FrameType.CHALLENGE, encodeChallengePayload(rejectedChallenge.payload)))
+    );
+    expect(rejectedRuntime.getStatus()).toEqual({ state: "offline", reconnectAttempts: 0, lastErrorCode: "AUTH_EXPIRED" });
   });
 
   it("fails closed when stream cleanup fails and stop cancels all future retries", () => {
