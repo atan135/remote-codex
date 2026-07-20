@@ -3,7 +3,8 @@ import { createSecureContext } from "node:tls";
 import {
   loadProductionBundle,
   type LoadedProductionBundle,
-  type LoadedServerProductionBundle
+  type LoadedServerProductionBundle,
+  type ServerTlsMinimumVersion
 } from "@remote-codex/ops";
 import {
   createTunnelServer,
@@ -19,7 +20,11 @@ import { fingerprintNonTlsServerBundle } from "./bundle-fingerprint.js";
 export interface ServerHostDependencies {
   readonly loadBundle: (rootDirectory: string, manifestPath: string) => LoadedProductionBundle;
   readonly createServer: (options: TunnelServerOptions) => TunnelServer;
-  readonly validateTls: (certificate: Buffer, privateKey: Buffer) => void;
+  readonly validateTls: (
+    certificate: Buffer,
+    privateKey: Buffer,
+    minimumVersion: ServerTlsMinimumVersion
+  ) => void;
   readonly listen: (server: TunnelServer, host: string, port: number, backlog: number) => Promise<void>;
   readonly writeLog: ProcessLogWriter;
 }
@@ -54,9 +59,13 @@ function safeErrorCode(error: unknown, fallback: string): string {
   return fallback;
 }
 
-function validateTls(certificate: Buffer, privateKey: Buffer): void {
+function validateTls(
+  certificate: Buffer,
+  privateKey: Buffer,
+  minimumVersion: ServerTlsMinimumVersion
+): void {
   try {
-    createSecureContext({ cert: certificate, key: privateKey, minVersion: "TLSv1.3" });
+    createSecureContext({ cert: certificate, key: privateKey, minVersion: minimumVersion });
   } catch {
     throw new ServerHostError("SERVER_HOST_TLS_CREDENTIALS_INVALID");
   }
@@ -104,7 +113,9 @@ function createOptions(
 ): TunnelServerOptions {
   return {
     tls: bundle.tls,
+    tlsMinimumVersion: bundle.hostConfig.tlsMinimumVersion,
     allowedOrigins: bundle.hostConfig.allowedOrigins,
+    clientAddressSource: bundle.hostConfig.clientAddressSource,
     limits: bundle.hostConfig.transportLimits,
     peerIdentities: bundle.peerIdentities,
     heartbeatTimeoutMs: bundle.config.limits.heartbeatTimeoutMs,
@@ -132,7 +143,7 @@ export async function startServerHost(
   try {
     bundle = requireServerBundle(resolved.loadBundle(rootDirectory, manifestPath));
     initialNonTlsFingerprint = fingerprintNonTlsServerBundle(bundle);
-    resolved.validateTls(bundle.tls.certificate, bundle.tls.privateKey);
+    resolved.validateTls(bundle.tls.certificate, bundle.tls.privateKey, bundle.hostConfig.tlsMinimumVersion);
     server = resolved.createServer(createOptions(bundle, logger));
     server.httpsServer.maxConnections = bundle.hostConfig.maxConnections;
     await resolved.listen(
@@ -149,8 +160,11 @@ export async function startServerHost(
   }
 
   const runningServer = server;
-  const publicWssUrl = `wss://${bundle.hostConfig.publicHostname}:${bundle.hostConfig.listenPort}${TUNNEL_WEBSOCKET_PATH}`;
-  const healthUrl = `https://${bundle.hostConfig.publicHostname}:${bundle.hostConfig.listenPort}${HEALTH_CHECK_PATH}`;
+  const publicAuthority = bundle.hostConfig.publicPort === 443
+    ? bundle.hostConfig.publicHostname
+    : `${bundle.hostConfig.publicHostname}:${bundle.hostConfig.publicPort}`;
+  const publicWssUrl = `wss://${publicAuthority}${TUNNEL_WEBSOCKET_PATH}`;
+  const healthUrl = `https://${publicAuthority}${HEALTH_CHECK_PATH}`;
   let closing: Promise<void> | undefined;
   const metricsTimer = setInterval(() => {
     const snapshot = runningServer.getMetrics?.();
@@ -173,11 +187,15 @@ export async function startServerHost(
         if (fingerprintNonTlsServerBundle(reloaded) !== initialNonTlsFingerprint) {
           throw new ServerHostError("SERVER_HOST_RELOAD_REQUIRES_RESTART");
         }
-        resolved.validateTls(reloaded.tls.certificate, reloaded.tls.privateKey);
+        resolved.validateTls(
+          reloaded.tls.certificate,
+          reloaded.tls.privateKey,
+          reloaded.hostConfig.tlsMinimumVersion
+        );
         runningServer.httpsServer.setSecureContext({
           cert: reloaded.tls.certificate,
           key: reloaded.tls.privateKey,
-          minVersion: "TLSv1.3"
+          minVersion: reloaded.hostConfig.tlsMinimumVersion
         });
         logger.lifecycle("server.tls_reloaded");
         return true;

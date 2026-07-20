@@ -58,7 +58,7 @@ function createCandidate(policy: ReleasePolicy = POLICY): { readonly parent: str
           : workspace.directory === "ops" && moduleName === "schema"
             ? "export const PRODUCTION_MANIFEST_SCHEMA_VERSION = 2;\n"
             : workspace.directory === "ops" && moduleName === "server-host"
-              ? "export const SERVER_HOST_CONFIG_SCHEMA_VERSION = 1;\n"
+              ? "export const SERVER_HOST_CONFIG_SCHEMA_VERSION = 2;\n"
           : "export {};\n");
     }
   }
@@ -199,11 +199,11 @@ describe("release 策略与清单", () => {
 
   it("拒绝范围外 listener、remote-client 依赖和协议/schema 版本漂移", () => {
     const port = createCandidate();
-    addPolicyFields(port.root, { listenPort: 7999 });
+    addPolicyFields(port.root, { listenPort: 0 });
     expectReleaseError(() => createReleaseInventory(port.root, POLICY_PATH, port.inventory), "OPS_RELEASE_LISTEN_PORT_REJECTED");
 
     const publicListener = createCandidate();
-    addPolicyFields(publicListener.root, { listenHost: "0.0.0.0" });
+    addPolicyFields(publicListener.root, { listenHost: "::1" });
     expectReleaseError(() => createReleaseInventory(publicListener.root, POLICY_PATH, publicListener.inventory), "OPS_RELEASE_LISTEN_HOST_REJECTED");
 
     for (const allowedDestination of [
@@ -221,9 +221,9 @@ describe("release 策略与清单", () => {
     }
 
     for (const serverUrl of [
-      "wss://127.0.0.1:8443/tunnel",
-      "wss://*.example.invalid:8443/tunnel",
-      "wss://Tunnel.Example.Invalid:8443/tunnel"
+      "wss://127.0.0.1/tunnel",
+      "wss://*.example.invalid/tunnel",
+      "wss://Tunnel.Example.Invalid/tunnel"
     ]) {
       const server = createCandidate();
       addPolicyFields(server.root, { serverUrl });

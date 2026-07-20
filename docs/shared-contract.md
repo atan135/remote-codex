@@ -115,7 +115,8 @@ requested -> authorized -> connecting -> open -> closing -> closed
 
 配置解析拒绝未知字段、空字符串、错误类型和超出默认值的限额。三个组件均要求
 `component`、其身份字段、`allowedDestination` 和可选的 `limits`；`serverUrl` 只接受
-不含凭据、查询或 fragment 的 `wss:` URL。认证私钥不属于 JSON 配置，必须由运行时的
+不含凭据、查询或 fragment 的 `wss:` URL；默认 Nginx `443` 可省略端口，非标准端口必须显式写出。
+认证私钥不属于 JSON 配置，必须由运行时的
 独立受保护输入提供。
 
 | 组件 | 必填字段 | 可选字段 |

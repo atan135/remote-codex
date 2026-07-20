@@ -2,9 +2,10 @@
   "schemaVersion": 1,
   "protocolVersion": 2,
   "productionManifestSchemaVersion": 2,
-  "serverHostConfigSchemaVersion": 1,
+  "serverHostConfigSchemaVersion": 2,
   "staticFiles": [
     "README.md",
+    "deployment/linux/nginx/remote-codex.conf",
     "deployment/linux/server/journald-remote-codex.conf",
     "deployment/linux/server/remote-codex-server-cert-reload.path",
     "deployment/linux/server/remote-codex-server-cert-reload.service",

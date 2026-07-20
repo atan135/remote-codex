@@ -47,8 +47,8 @@ $configuration = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 $serverUri = [Uri]$configuration.serverUrl
 if (
     $serverUri.Scheme -ne 'wss' -or
-    $serverUri.Port -lt 8000 -or
-    $serverUri.Port -gt 9000 -or
+    $serverUri.Port -lt 1 -or
+    $serverUri.Port -gt 65535 -or
     $configuration.listenHost -ne '127.0.0.1' -or
     $configuration.listenPort -lt 8000 -or
     $configuration.listenPort -gt 9000

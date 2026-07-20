@@ -310,10 +310,10 @@ function assertPortBoundaries(value: unknown): void {
   }
   const object = value as Record<string, unknown>;
   for (const [key, entry] of Object.entries(object)) {
-    if (key === "listenPort" && (!Number.isInteger(entry) || (entry as number) < 8000 || (entry as number) > 9000)) {
+    if (key === "listenPort" && (!Number.isInteger(entry) || (entry as number) < 1 || (entry as number) > 65_535)) {
       fail("OPS_RELEASE_LISTEN_PORT_REJECTED");
     }
-    if (key === "listenHost" && entry !== "127.0.0.1") {
+    if (key === "listenHost" && entry !== "127.0.0.1" && entry !== "0.0.0.0") {
       fail("OPS_RELEASE_LISTEN_HOST_REJECTED");
     }
     if (key === "serverUrl") {
@@ -326,8 +326,8 @@ function assertPortBoundaries(value: unknown): void {
       } catch {
         return fail("OPS_RELEASE_SERVER_URL_REJECTED");
       }
-      const port = Number(serverUrl.port);
-      if (serverUrl.protocol !== "wss:" || serverUrl.port === "" || port < 8000 || port > 9000 ||
+      const port = serverUrl.port === "" ? 443 : Number(serverUrl.port);
+      if (serverUrl.protocol !== "wss:" || port < 1 || port > 65_535 ||
           serverUrl.pathname !== "/tunnel" || serverUrl.username !== "" || serverUrl.password !== "" ||
           serverUrl.search !== "" || serverUrl.hash !== "") {
         fail("OPS_RELEASE_SERVER_URL_REJECTED");

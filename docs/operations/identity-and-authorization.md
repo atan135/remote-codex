@@ -24,8 +24,8 @@ config、peer registry 和 authorization registry 在 POSIX 上必须为 owner-o
 盘符、alternate data stream 或符号链接。
 
 production manifest 当前 schema 为 `schemaVersion: 2`；v1 会以
-`OPS_MANIFEST_VERSION_MISMATCH` 明确拒绝，不能按旧 shape 猜测或降级加载。server 新增的
-`host.json` 使用独立的 `schemaVersion: 1`，两者不是同一个 schema。
+`OPS_MANIFEST_VERSION_MISMATCH` 明确拒绝，不能按旧 shape 猜测或降级加载。server 的
+`host.json` 使用独立的 `schemaVersion: 2`，两者不是同一个 schema。
 
 加载顺序固定为：
 

@@ -38,9 +38,10 @@ describe("阶段 6 生产暴露面静态审计", () => {
     const agentHostRuntime = read("egress-agent-host/src/runtime.ts");
 
     expect(serverRuntime).toContain('import { createServer, type Server as HttpsServer } from "node:https"');
+    expect(serverRuntime).toContain('import { isIP } from "node:net"');
     expect(serverRuntime).toContain("request.url === HEALTH_CHECK_PATH");
     expect(serverRuntime).toContain("request.url === TUNNEL_WEBSOCKET_PATH");
-    expect(serverRuntime).not.toMatch(/node:net|\.connect\s*\(/u);
+    expect(serverRuntime).not.toMatch(/(?:\.connect|createConnection)\s*\(/u);
     expect(serverHostRuntime).toContain("server.httpsServer.listen({ host, port, backlog, exclusive: true })");
 
     expect(edgeProxy).toContain('export const LOOPBACK_LISTEN_HOST = "127.0.0.1"');

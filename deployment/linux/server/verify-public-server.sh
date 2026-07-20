@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 3 ]]; then
-  echo "用法: $0 <hostname> <8000-9000 端口> <允许的 HTTPS Origin>" >&2
+  echo "用法: $0 <hostname> <公网 HTTPS 端口> <允许的 HTTPS Origin>" >&2
   exit 2
 fi
 
@@ -10,8 +10,8 @@ host="$1"
 port="$2"
 origin="$3"
 
-if [[ ! "$port" =~ ^[0-9]+$ ]] || (( port < 8000 || port > 9000 )); then
-  echo "端口必须在 8000-9000 范围内" >&2
+if [[ ! "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+  echo "端口必须在 1-65535 范围内" >&2
   exit 2
 fi
 if ! REMOTE_CODEX_VERIFY_HOST="$host" REMOTE_CODEX_VERIFY_ORIGIN="$origin" \
@@ -47,8 +47,8 @@ if curl --silent --show-error --output /dev/null --max-time 5 "http://${host}:${
   exit 1
 fi
 
-if curl --silent --show-error --output /dev/null --max-time 5 --tls-max 1.2 "${base}/health"; then
-  echo "TLS 1.2 请求不应成功" >&2
+if curl --silent --show-error --output /dev/null --max-time 5 --tls-max 1.1 "${base}/health"; then
+  echo "TLS 1.1 请求不应成功" >&2
   exit 1
 fi
 

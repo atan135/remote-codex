@@ -47,7 +47,7 @@ import {
 const AGENT_KEYS = generateKeyPairSync("ed25519");
 const SERVER_KEYS = generateKeyPairSync("ed25519");
 
-function bundle(serverUrl = "wss://tunnel.example.invalid:8443/tunnel"): LoadedEgressAgentProductionBundle {
+function bundle(serverUrl = "wss://tunnel.example.invalid/tunnel"): LoadedEgressAgentProductionBundle {
   return {
     component: "egress-agent",
     config: {
@@ -179,10 +179,10 @@ describe("egress agent production host", () => {
     });
 
     expect(options).toMatchObject({
-      origin: "https://tunnel.example.invalid:8443",
+      origin: "https://tunnel.example.invalid",
       config: {
         agentId: "company-agent-01",
-        serverUrl: new URL("wss://tunnel.example.invalid:8443/tunnel"),
+        serverUrl: new URL("wss://tunnel.example.invalid/tunnel"),
         allowedDestination: { hostname: "gateway.example.invalid", port: 443 }
       },
       authenticationIdentity: { kind: "egress-agent", agentId: "company-agent-01" },
@@ -203,10 +203,24 @@ describe("egress agent production host", () => {
     expect(running.getStatus()).toEqual({ state: "stopped", reconnectAttempts: 0 });
   });
 
+  it("接受显式非标准 Public Server 端口", () => {
+    const runtime = new FakeRuntime();
+    const harness = hostHarness(runtime);
+    let origin: string | undefined;
+    const running = startEgressAgentHost("config-root", "manifest.json", {
+      ...harness.dependencies,
+      loadBundle: () => bundle("wss://tunnel.example.invalid:9443/tunnel"),
+      createRuntime: (options) => {
+        origin = options.origin;
+        return runtime;
+      }
+    });
+    expect(origin).toBe("https://tunnel.example.invalid:9443");
+    running.close();
+  });
+
   it.each([
-    "wss://tunnel.example.invalid/tunnel",
-    "wss://tunnel.example.invalid:7999/tunnel",
-    "wss://tunnel.example.invalid:9001/tunnel",
+    "wss://tunnel.example.invalid:0/tunnel",
     "wss://127.0.0.1:8443/tunnel",
     "wss://tunnel.example.invalid:8443/other",
     "wss://tunnel.example.invalid:8443/tunnel?debug=true"
@@ -480,8 +494,8 @@ describe("Windows 部署静态边界", () => {
     const outputBlock = networkCheck.slice(networkCheck.indexOf("[pscustomobject]@{"));
     expect(networkCheck).toContain("Get-NetTCPConnection");
     expect(networkCheck).toContain("$connection.State -eq 'Listen'");
-    expect(networkCheck).toContain("$serverUri.Port -lt 8000");
-    expect(networkCheck).toContain("$serverUri.Port -gt 9000");
+    expect(networkCheck).toContain("$serverUri.Port -lt 1");
+    expect(networkCheck).toContain("$serverUri.Port -gt 65535");
     expect(networkCheck).toContain("$connection.RemotePort -eq 443");
     expect(networkCheck).toContain("$connection.State -eq 'Established'");
     expect(networkCheck).toContain("$connection.RemotePort -eq 0");

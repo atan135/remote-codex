@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createServer, type Server as HttpsServer } from "node:https";
+import { isIP } from "node:net";
 import type { Duplex } from "node:stream";
 
 import {
@@ -50,6 +51,10 @@ export interface ServerTransportLimits {
   readonly maxMessageBytes: number;
 }
 
+/** 连接频率限制使用的客户端地址来源。 */
+export type ClientAddressSource = "socket" | "loopback-x-forwarded-for";
+export type TlsMinimumVersion = "TLSv1.2" | "TLSv1.3";
+
 export const DEFAULT_SERVER_TRANSPORT_LIMITS: ServerTransportLimits = Object.freeze({
   maxUpgradeHeaderBytes: 16 * 1024,
   maxUpgradeHeaderCount: 64,
@@ -78,7 +83,9 @@ export interface ServerStreamAuthorizationOptions {
 
 export interface TunnelServerOptions {
   readonly tls: TlsCredentials;
+  readonly tlsMinimumVersion?: TlsMinimumVersion;
   readonly allowedOrigins: readonly string[];
+  readonly clientAddressSource?: ClientAddressSource;
   readonly limits?: Partial<ServerTransportLimits>;
   /** 仅接受由进程内配置注入的公钥身份；不得从连接请求读取凭据。 */
   readonly peerIdentities?: readonly ServerPeerIdentityRegistration[];
@@ -181,6 +188,51 @@ function validateTlsCredentials(credentials: TlsCredentials): void {
   if (credentials.certificate.byteLength === 0 || credentials.privateKey.byteLength === 0) {
     startupFailure("SERVER_TLS_CREDENTIALS_EMPTY");
   }
+}
+
+function resolveTlsMinimumVersion(value: TlsMinimumVersion | undefined): TlsMinimumVersion {
+  if (value === undefined || value === "TLSv1.3") {
+    return "TLSv1.3";
+  }
+  if (value === "TLSv1.2") {
+    return value;
+  }
+  return startupFailure("SERVER_TLS_MINIMUM_VERSION_INVALID");
+}
+
+function resolveClientAddressSource(value: ClientAddressSource | undefined): ClientAddressSource {
+  if (value === undefined || value === "socket") {
+    return "socket";
+  }
+  if (value === "loopback-x-forwarded-for") {
+    return value;
+  }
+  return startupFailure("SERVER_CLIENT_ADDRESS_SOURCE_INVALID");
+}
+
+function forwardedAddress(request: IncomingMessage): string | undefined {
+  const values: string[] = [];
+  for (let index = 0; index < request.rawHeaders.length; index += 2) {
+    if (request.rawHeaders[index]?.toLowerCase() === "x-forwarded-for") {
+      values.push(request.rawHeaders[index + 1] ?? "");
+    }
+  }
+  if (values.length !== 1) {
+    return undefined;
+  }
+  const value = values[0]!;
+  return isIP(value) === 0 || value.includes(",") ? undefined : value;
+}
+
+function connectionAddress(request: IncomingMessage, source: ClientAddressSource): string | undefined {
+  const socketAddress = request.socket.remoteAddress ?? "unknown";
+  if (source === "socket") {
+    return socketAddress;
+  }
+  if (socketAddress !== "127.0.0.1") {
+    return undefined;
+  }
+  return forwardedAddress(request);
 }
 
 function upgradeHeaderBytes(request: IncomingMessage): number {
@@ -289,6 +341,8 @@ export async function loadTlsCredentials(paths: TlsCredentialPaths): Promise<Tls
 export function createTunnelServer(options: TunnelServerOptions): TunnelServer {
   assertTlsVerificationEnabled(process.env);
   validateTlsCredentials(options.tls);
+  const tlsMinimumVersion = resolveTlsMinimumVersion(options.tlsMinimumVersion);
+  const clientAddressSource = resolveClientAddressSource(options.clientAddressSource);
   const allowedOrigins = validateAllowedOrigins(options.allowedOrigins);
   const limits = resolveTransportLimits(options.limits);
   let httpsServer: HttpsServer;
@@ -298,7 +352,7 @@ export function createTunnelServer(options: TunnelServerOptions): TunnelServer {
       {
         cert: options.tls.certificate,
         key: options.tls.privateKey,
-        minVersion: "TLSv1.3",
+        minVersion: tlsMinimumVersion,
         maxHeaderSize: limits.maxUpgradeHeaderBytes
       },
       createHttpRequestHandler()
@@ -392,7 +446,11 @@ export function createTunnelServer(options: TunnelServerOptions): TunnelServer {
       return;
     }
 
-    const connectionKey = request.socket.remoteAddress ?? "unknown";
+    const connectionKey = connectionAddress(request, clientAddressSource);
+    if (connectionKey === undefined) {
+      rejectUpgrade(socket, 400);
+      return;
+    }
     const connectionRateDecision = connectionRates.record(connectionKey);
     if (connectionRateDecision === "address-capacity-exceeded") {
       rejectUpgrade(socket, 503);

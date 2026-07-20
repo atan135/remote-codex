@@ -6,8 +6,6 @@ import {
 } from "@remote-codex/egress-agent";
 import {
   loadProductionBundle,
-  PRODUCTION_LISTEN_PORT_MAX,
-  PRODUCTION_LISTEN_PORT_MIN,
   type LoadedEgressAgentProductionBundle,
   type LoadedProductionBundle
 } from "@remote-codex/ops";
@@ -88,13 +86,13 @@ function validateServerUrl(serverUrl: URL): string {
   } catch {
     throw new EgressAgentHostError("AGENT_HOST_SERVER_URL_INVALID");
   }
-  const port = Number(serverUrl.port);
+  const port = serverUrl.port === "" ? 443 : Number(serverUrl.port);
   if (
     serverUrl.protocol !== "wss:" ||
     serverUrl.hostname !== normalizedHostname ||
     !Number.isSafeInteger(port) ||
-    port < PRODUCTION_LISTEN_PORT_MIN ||
-    port > PRODUCTION_LISTEN_PORT_MAX ||
+    port < 1 ||
+    port > 65_535 ||
     serverUrl.pathname !== TUNNEL_PATH ||
     serverUrl.username.length > 0 ||
     serverUrl.password.length > 0 ||

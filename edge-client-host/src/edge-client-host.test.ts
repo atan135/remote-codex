@@ -53,7 +53,7 @@ const EDGE_KEYS = generateKeyPairSync("ed25519");
 const SERVER_KEYS = generateKeyPairSync("ed25519");
 
 function bundle(
-  serverUrl = "wss://tunnel.example.invalid:8443/tunnel",
+  serverUrl = "wss://tunnel.example.invalid/tunnel",
   listenPort = 8_787,
   destinationHostname = "gateway.example.invalid"
 ): LoadedEdgeClientProductionBundle {
@@ -215,11 +215,11 @@ describe("edge production host", () => {
     });
 
     expect(runtimeOptions).toMatchObject({
-      origin: "https://tunnel.example.invalid:8443",
+      origin: "https://tunnel.example.invalid",
       config: {
         edgeUserId: "edge-user-01",
         edgeDeviceId: "edge-device-01",
-        serverUrl: new URL("wss://tunnel.example.invalid:8443/tunnel")
+        serverUrl: new URL("wss://tunnel.example.invalid/tunnel")
       },
       authenticationIdentity: { kind: "edge-device", edgeDeviceId: "edge-device-01" }
     });
@@ -240,10 +240,25 @@ describe("edge production host", () => {
     expect(harness.releaseLifetime).toHaveBeenCalledOnce();
   });
 
+  it("接受显式非标准 Public Server 端口", async () => {
+    const runtime = new FakeRuntime();
+    const proxy = new FakeProxy();
+    const harness = hostHarness(runtime, proxy);
+    let origin: string | undefined;
+    const running = await startEdgeClientHost("config-root", "manifest.json", {
+      ...harness.dependencies,
+      loadBundle: () => bundle("wss://tunnel.example.invalid:9443/tunnel"),
+      createRuntime: (options) => {
+        origin = options.origin;
+        return runtime;
+      }
+    });
+    expect(origin).toBe("https://tunnel.example.invalid:9443");
+    await running.close();
+  });
+
   it.each([
-    "wss://tunnel.example.invalid/tunnel",
-    "wss://tunnel.example.invalid:7999/tunnel",
-    "wss://tunnel.example.invalid:9001/tunnel",
+    "wss://tunnel.example.invalid:0/tunnel",
     "wss://127.0.0.1:8443/tunnel",
     "wss://tunnel.example.invalid:8443/other",
     "wss://tunnel.example.invalid:8443/tunnel?debug=true",

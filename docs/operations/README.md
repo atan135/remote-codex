@@ -1,8 +1,8 @@
 # Remote Codex 运维入口
 
 本目录只覆盖 Remote Codex 受限 HTTPS 隧道。所有操作都必须保持唯一公开 Server TLS/WSS、
-Agent 无入站、Edge 只监听 `127.0.0.1`、应用 listener 位于 `8000-9000`、模型网关只允许精确
-hostname 的出站 `443`。不得借故障处理增加代理目标、listener、远程命令或 `remote-client`
+Agent 无入站、Edge 只监听 `127.0.0.1`、Nginx 是唯一公网 `443` listener、Node server 只绑定
+`127.0.0.1`，模型网关只允许精确 hostname 的出站 `443`。不得借故障处理增加代理目标、listener、远程命令或 `remote-client`
 依赖。
 
 ## 文档索引

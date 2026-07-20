@@ -19,7 +19,10 @@ export {
 export {
   parseServerHostConfigJson,
   SERVER_HOST_CONFIG_SCHEMA_VERSION,
-  type ServerHostConfig
+  type ServerClientAddressSource,
+  type ServerHostConfig,
+  type ServerListenHost,
+  type ServerTlsMinimumVersion
 } from "./server-host.js";
 export {
   loadPeerIdentityRegistry,

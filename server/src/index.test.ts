@@ -49,12 +49,24 @@ afterEach(async () => {
   runningServer = undefined;
 });
 
-async function startServer(maxMessageBytes = 64): Promise<string> {
+interface ServerFixtureOptions {
+  readonly maxMessageBytes?: number;
+  readonly tlsMinimumVersion?: "TLSv1.2" | "TLSv1.3";
+  readonly clientAddressSource?: "socket" | "loopback-x-forwarded-for";
+  readonly maxConnectionsPerWindow?: number;
+}
+
+async function startServer(options: ServerFixtureOptions = {}): Promise<string> {
   runningServer = createTunnelServer({
     tls: testTlsCredentials,
+    ...(options.tlsMinimumVersion === undefined ? {} : { tlsMinimumVersion: options.tlsMinimumVersion }),
     allowedOrigins: [TEST_ORIGIN],
+    ...(options.clientAddressSource === undefined ? {} : { clientAddressSource: options.clientAddressSource }),
     limits: {
-      maxMessageBytes,
+      maxMessageBytes: options.maxMessageBytes ?? 64,
+      ...(options.maxConnectionsPerWindow === undefined
+        ? {}
+        : { maxConnectionsPerWindow: options.maxConnectionsPerWindow }),
       maxUpgradeHeaderBytes: 4 * 1024
     }
   });
@@ -210,7 +222,7 @@ describe("受限 HTTPS/WSS 入口", () => {
   });
 
   it("拒绝超过单条消息上限的 WebSocket frame", async () => {
-    const baseUrl = await startServer(8);
+    const baseUrl = await startServer({ maxMessageBytes: 8 });
     const socket = await openSocket(`${baseUrl}/tunnel`);
     const closed = once(socket, "close");
     socket.send(Buffer.alloc(9));
@@ -235,5 +247,45 @@ describe("受限 HTTPS/WSS 入口", () => {
     });
 
     expect(failure).toBeInstanceOf(Error);
+  });
+
+  it("可在明确配置后接受 TLS 1.2", async () => {
+    const baseUrl = await startServer({ tlsMinimumVersion: "TLSv1.2" });
+    const statusCode = await new Promise<number | undefined>((resolve, reject) => {
+      const tls12Request = request(
+        `${baseUrl.replace("wss:", "https:")}/health`,
+        {
+          maxVersion: "TLSv1.2",
+          minVersion: "TLSv1.2",
+          rejectUnauthorized: false
+        },
+        (response) => resolve(response.statusCode)
+      );
+      tls12Request.once("error", reject);
+      tls12Request.end();
+    });
+    expect(statusCode).toBe(200);
+  });
+
+  it("loopback 反代模式要求单个合法 X-Forwarded-For，并按该地址限流", async () => {
+    const baseUrl = await startServer({
+      clientAddressSource: "loopback-x-forwarded-for",
+      maxConnectionsPerWindow: 1
+    });
+    expect((await rejectSocket(`${baseUrl}/tunnel`)).message).toContain("Unexpected server response: 400");
+
+    const first = await openSocket(`${baseUrl}/tunnel`, { "x-forwarded-for": "198.51.100.10" });
+    const firstClosed = new Promise<void>((resolve) => first.once("close", () => resolve()));
+    first.close();
+    await firstClosed;
+
+    const second = await openSocket(`${baseUrl}/tunnel`, { "x-forwarded-for": "198.51.100.11" });
+    second.close();
+    expect((await rejectSocket(`${baseUrl}/tunnel`, { "x-forwarded-for": "198.51.100.10" })).message).toContain(
+      "Unexpected server response: 429"
+    );
+    expect((await rejectSocket(`${baseUrl}/tunnel`, { "x-forwarded-for": "198.51.100.10, 198.51.100.12" })).message).toContain(
+      "Unexpected server response: 400"
+    );
   });
 });

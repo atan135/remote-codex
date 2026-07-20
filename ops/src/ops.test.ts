@@ -200,15 +200,18 @@ describe("离线 CLI", () => {
 });
 
 describe("生产 manifest 与最小权限", () => {
-  it("严格限制 public server 的唯一 TLS listener 和传输资源", () => {
+  it("支持 loopback Nginx 反代并严格限制代理信任边界与传输资源", () => {
     const valid = {
-      schemaVersion: 1,
-      listenHost: "0.0.0.0",
+      schemaVersion: 2,
+      listenHost: "127.0.0.1",
       listenPort: 8443,
       publicHostname: "tunnel.example.invalid",
-      allowedOrigins: ["https://edge.example.invalid", "https://agent.example.invalid"],
+      publicPort: 443,
+      allowedOrigins: ["https://tunnel.example.invalid"],
       tlsCertificatePath: "tls/fullchain.pem",
       tlsPrivateKeyPath: "tls/private-key.pem",
+      tlsMinimumVersion: "TLSv1.3",
+      clientAddressSource: "loopback-x-forwarded-for",
       maxConnections: 256,
       listenBacklog: 128,
       shutdownTimeoutMs: 15_000,
@@ -225,14 +228,12 @@ describe("生产 manifest 与最小权限", () => {
       }
     };
     expect(parseServerHostConfigJson(JSON.stringify(valid))).toMatchObject({
-      listenHost: "0.0.0.0",
+      listenHost: "127.0.0.1",
       listenPort: 8443,
-      publicHostname: "tunnel.example.invalid"
+      publicHostname: "tunnel.example.invalid",
+      publicPort: 443
     });
-    expectOpsError(
-      () => parseServerHostConfigJson(JSON.stringify({ ...valid, listenPort: 443 })),
-      "OPS_SERVER_HOST_INTEGER_INVALID"
-    );
+    expect(parseServerHostConfigJson(JSON.stringify({ ...valid, listenPort: 443 })).listenPort).toBe(443);
     expectOpsError(
       () => parseServerHostConfigJson(JSON.stringify({ ...valid, publicHostname: "127.0.0.1" })),
       "OPS_SERVER_PUBLIC_HOSTNAME_INVALID"
@@ -250,8 +251,16 @@ describe("生产 manifest 与最小权限", () => {
       "OPS_SERVER_ORIGIN_INVALID"
     );
     expectOpsError(
-      () => parseServerHostConfigJson(JSON.stringify({ ...valid, listenHost: "127.0.0.1" })),
-      "OPS_SERVER_LISTEN_HOST_INVALID"
+      () => parseServerHostConfigJson(JSON.stringify({ ...valid, listenHost: "0.0.0.0", publicPort: 8443 })),
+      "OPS_SERVER_PROXY_SOURCE_REQUIRES_LOOPBACK"
+    );
+    expectOpsError(
+      () => parseServerHostConfigJson(JSON.stringify({ ...valid, clientAddressSource: "socket", listenHost: "0.0.0.0" })),
+      "OPS_SERVER_PUBLIC_PORT_MISMATCH"
+    );
+    expectOpsError(
+      () => parseServerHostConfigJson(JSON.stringify({ ...valid, tlsMinimumVersion: "TLSv1.1" })),
+      "OPS_SERVER_TLS_MINIMUM_VERSION_INVALID"
     );
     expectOpsError(
       () => parseServerHostConfigJson(JSON.stringify({
@@ -469,13 +478,16 @@ describe("离线生产 bundle 校验", () => {
         allowedDestination: DEFAULT_ALLOWED_DESTINATION
       });
       writeOwnerFile(root, "host.json", {
-        schemaVersion: 1,
-        listenHost: "0.0.0.0",
+        schemaVersion: 2,
+        listenHost: "127.0.0.1",
         listenPort: 8443,
         publicHostname: "tunnel.example.invalid",
+        publicPort: 443,
         allowedOrigins: ["https://edge.example.invalid"],
         tlsCertificatePath: "tls/fullchain.pem",
         tlsPrivateKeyPath: "tls/private-key.pem",
+        tlsMinimumVersion: "TLSv1.3",
+        clientAddressSource: "loopback-x-forwarded-for",
         maxConnections: 256,
         listenBacklog: 128,
         shutdownTimeoutMs: 15_000,
@@ -498,7 +510,7 @@ describe("离线生产 bundle 校验", () => {
       expect(loaded).toMatchObject({
         component: "server",
         config: { serverId: "server-01" },
-        hostConfig: { listenHost: "0.0.0.0", listenPort: 8443 },
+        hostConfig: { listenHost: "127.0.0.1", listenPort: 8443, publicPort: 443 },
         tls: { certificate: Buffer.from("certificate"), privateKey: Buffer.from("private-key") }
       });
       expect(JSON.stringify(loaded)).not.toContain("BEGIN PRIVATE KEY");

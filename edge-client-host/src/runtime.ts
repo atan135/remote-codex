@@ -106,13 +106,13 @@ function validateProductionBundle(bundle: LoadedEdgeClientProductionBundle): str
   } catch {
     throw new EdgeClientHostError("EDGE_HOST_NETWORK_POLICY_INVALID");
   }
-  const serverPort = Number(serverUrl.port);
+  const serverPort = serverUrl.port === "" ? 443 : Number(serverUrl.port);
   if (
     serverUrl.protocol !== "wss:" ||
     serverUrl.hostname !== serverHostname ||
     !Number.isSafeInteger(serverPort) ||
-    serverPort < PRODUCTION_LISTEN_PORT_MIN ||
-    serverPort > PRODUCTION_LISTEN_PORT_MAX ||
+    serverPort < 1 ||
+    serverPort > 65_535 ||
     serverUrl.pathname !== TUNNEL_PATH ||
     serverUrl.username.length > 0 ||
     serverUrl.password.length > 0 ||

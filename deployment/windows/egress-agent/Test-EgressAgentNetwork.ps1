@@ -45,7 +45,7 @@ if ($manifestDocument.component -ne 'egress-agent' -or $manifestDocument.configP
 $configPath = Join-Path $config $manifestDocument.configPath
 $configuration = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 $serverUri = [Uri]$configuration.serverUrl
-if ($serverUri.Scheme -ne 'wss' -or $serverUri.Port -lt 8000 -or $serverUri.Port -gt 9000) {
+if ($serverUri.Scheme -ne 'wss' -or $serverUri.Port -lt 1 -or $serverUri.Port -gt 65535) {
     throw 'AGENT_NETWORK_SERVER_URL_INVALID'
 }
 

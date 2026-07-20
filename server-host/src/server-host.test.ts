@@ -19,13 +19,16 @@ const PEER_KEYS_V2 = generateKeyPairSync("ed25519");
 
 function hostConfig(overrides: Record<string, unknown> = {}): LoadedServerProductionBundle["hostConfig"] {
   return {
-    schemaVersion: 1,
-    listenHost: "0.0.0.0",
+    schemaVersion: 2,
+    listenHost: "127.0.0.1",
     listenPort: 8443,
     publicHostname: "tunnel.example.invalid",
+    publicPort: 443,
     allowedOrigins: ["https://edge.example.invalid"],
     tlsCertificatePath: "tls/fullchain.pem",
     tlsPrivateKeyPath: "tls/private-key.pem",
+    tlsMinimumVersion: "TLSv1.3",
+    clientAddressSource: "loopback-x-forwarded-for",
     maxConnections: 256,
     listenBacklog: 128,
     shutdownTimeoutMs: 1_000,
@@ -140,7 +143,7 @@ function fakeTunnel(): {
 }
 
 describe("server host", () => {
-  it("只用严格 bundle 启动一个 8443 listener 并组合 stream 授权", async () => {
+  it("以 loopback 后端启动并公开 Nginx 的 443 URL", async () => {
     const logs: string[] = [];
     const fake = fakeTunnel();
     let createdOptions: TunnelServerOptions | undefined;
@@ -156,15 +159,17 @@ describe("server host", () => {
       writeLog: (line) => logs.push(line)
     });
 
-    expect(listen).toHaveBeenCalledWith(fake.tunnel, "0.0.0.0", 8443, 128);
+    expect(listen).toHaveBeenCalledWith(fake.tunnel, "127.0.0.1", 8443, 128);
     expect(createdOptions).toMatchObject({
+      tlsMinimumVersion: "TLSv1.3",
+      clientAddressSource: "loopback-x-forwarded-for",
       allowedOrigins: ["https://edge.example.invalid"],
       peerIdentities: [expect.objectContaining({ identity: expect.objectContaining({ kind: "edge-device" }) })],
       streamAuthorization: { allowedDestination: { hostname: "gateway.example.invalid", port: 443 } }
     });
     expect(fake.tunnel.httpsServer.maxConnections).toBe(256);
-    expect(running.publicWssUrl).toBe("wss://tunnel.example.invalid:8443/tunnel");
-    expect(running.healthUrl).toBe("https://tunnel.example.invalid:8443/health");
+    expect(running.publicWssUrl).toBe("wss://tunnel.example.invalid/tunnel");
+    expect(running.healthUrl).toBe("https://tunnel.example.invalid/health");
     expect(logs.join("")).not.toContain("private-key-v1");
     await running.close();
     expect(fake.close).toHaveBeenCalledOnce();
@@ -390,13 +395,15 @@ describe("进程日志白名单", () => {
 });
 
 describe("Linux 部署模板", () => {
-  it("只启动一个受限 server 进程并提供证书 reload 与手工边界检查", () => {
+  it("以受限 Nginx 公开入口、loopback server 与证书 reload 组成部署模板", () => {
     const deploymentRoot = new URL("../../deployment/linux/server/", import.meta.url);
+    const nginxRoot = new URL("../../deployment/linux/nginx/", import.meta.url);
     const service = readFileSync(new URL("remote-codex-server.service", deploymentRoot), "utf8");
     const reloadPath = readFileSync(new URL("remote-codex-server-cert-reload.path", deploymentRoot), "utf8");
     const reloadService = readFileSync(new URL("remote-codex-server-cert-reload.service", deploymentRoot), "utf8");
     const journald = readFileSync(new URL("journald-remote-codex.conf", deploymentRoot), "utf8");
     const verification = readFileSync(new URL("verify-public-server.sh", deploymentRoot), "utf8");
+    const nginx = readFileSync(new URL("remote-codex.conf", nginxRoot), "utf8");
 
     expect(service.match(/^ExecStart=/gmu)).toHaveLength(1);
     expect(service).toContain("User=remote-codex");
@@ -411,10 +418,16 @@ describe("Linux 部署模板", () => {
     expect(reloadService).toContain("--signal=HUP remote-codex-server.service");
     expect(journald).toContain("SystemMaxUse=1G");
     expect(journald).toContain("MaxRetentionSec=14day");
-    expect(verification).toContain("port < 8000 || port > 9000");
+    expect(nginx).toContain("listen 443 ssl http2");
+    expect(nginx).toContain("proxy_pass https://127.0.0.1:8443");
+    expect(nginx).toContain("proxy_set_header X-Forwarded-For $remote_addr");
+    expect(nginx).toContain("proxy_ssl_verify on");
+    expect(nginx).not.toContain("proxy_add_x_forwarded_for");
+    expect(verification).toContain("port < 1 || port > 65535");
     expect(verification).toContain("validate-public-input.mjs");
     expect(verification).toContain('expect_code 404 "${base}/metrics"');
     expect(verification).toContain('expect_code 426 "${base}/tunnel"');
+    expect(verification).toContain("--tls-max 1.1");
     expect(verification).not.toContain("--insecure");
   });
 
@@ -443,5 +456,5 @@ describe("Linux 部署模板", () => {
     expect(validate("tunnel.example.invalid", "https://edge.example.invalid/path")).not.toBe(0);
     expect(validate("tunnel.example.invalid", "https://edge.example.invalid?query=1")).not.toBe(0);
     expect(validate("tunnel.example.invalid", "https://edge.example.invalid#fragment")).not.toBe(0);
-  });
+  }, 20_000);
 });
