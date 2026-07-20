@@ -92,6 +92,7 @@ Codex 当前 shell 的 `HTTPS_PROXY`。
 HTTP/1.1、认证头（含 `Authorization` 与 `Proxy-Authorization`）、`Upgrade`、请求 body、
 `CONNECT` 头部后的额外字节、IP literal、非 `443`、IPv6 `::1`、局域网/公网 listener、
 DNS 放宽、redirect 和任意 TCP 目标。edge 不保存或向本地前端暴露 capability。
+代理接受不含凭据的 `Proxy-Connection` 兼容头，但不使用它参与认证、目标选择或路由。
 
 本地 socket、edge stream 与当前 WSS session 一一绑定。edge WSS、server 会话或 agent
 会话断开时，edge 会关闭所有 pending 与 open 的本地 socket，释放 credit、队列和预算；旧

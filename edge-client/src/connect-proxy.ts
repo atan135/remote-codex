@@ -93,7 +93,6 @@ function hasForbiddenConnectHeaders(request: IncomingMessage): boolean {
   const forbiddenHeaders = new Set([
     "authorization",
     "proxy-authorization",
-    "proxy-connection",
     "content-length",
     "transfer-encoding",
     "upgrade",

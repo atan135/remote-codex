@@ -145,6 +145,9 @@ Remove-Item Env:HTTPS_PROXY
 - DNS 放宽、IP literal、通配符主机、重定向、非 `443` 端口和任意 TCP 目标。
 - remote desktop、shell、VPN、文件管理、管理 API 或公网控制面。
 
+为兼容标准 HTTP CONNECT 客户端，代理接受不含凭据的 `Proxy-Connection`，但它不参与认证、目标
+选择或路由。
+
 TLS 应用内容从 Codex 到已批准模型网关端到端保持不透明。server 和 egress-agent 不终止、
 检查、修改或记录 TLS plaintext；日志只允许记录经白名单筛选的 stream 元数据。
 

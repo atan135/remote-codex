@@ -366,6 +366,19 @@ describe("LoopbackConnectProxy", () => {
     expect(gateway.streams).toHaveLength(0);
   });
 
+  it("允许无凭据的 Proxy-Connection 兼容头", async () => {
+    const gateway = new FakeGateway();
+    const proxy = await startProxy(gateway);
+    const capture = await request(
+      proxy,
+      `CONNECT ${DEFAULT_ALLOWED_DESTINATION.hostname}:443 HTTP/1.1\r\nProxy-Connection: Keep-Alive\r\n\r\n`
+    );
+
+    await waitFor(() => gateway.streams.length === 1);
+    expect(gateway.destinations).toEqual([DEFAULT_ALLOWED_DESTINATION]);
+    capture.socket.destroy();
+  });
+
   it("阶段 6 目标矩阵只接受大小写等价的精确 hostname，所有绕过均不创建 stream", async () => {
     const gateway = new FakeGateway();
     const proxy = await startProxy(gateway);
