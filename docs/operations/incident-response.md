@@ -10,7 +10,7 @@
 
 1. 记录 UTC/本地时间、release aggregate SHA-256、组件、脱敏稳定错误码和计数，不记录异常对象。
 2. 对配置根运行 `deployment validate`，确认 schema、owner-only ACL、key 角色和引用仍有效。
-3. Server 检查经 Nginx 的 `/health`、唯一公网 `443` listener、仅 loopback 的 Node listener、TLS 有效期和 journald；Agent 运行
+3. Server 检查 `https://<hostname>:8443/health`、唯一公网 `8443` listener、TLS 有效期和 journald；Agent 运行
    `Test-EgressAgentNetwork.ps1`；Edge 运行 `Test-EdgeClientStatus.ps1`。
 4. 按 `edge -> server authorization/session -> agent -> gateway` 定位。Edge 离线时本地 CONNECT
    固定失败；没有“暂存请求后改走直连”的恢复路径。

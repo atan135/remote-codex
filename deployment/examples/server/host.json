@@ -1,16 +1,16 @@
 {
   "schemaVersion": 2,
-  "listenHost": "127.0.0.1",
+  "listenHost": "0.0.0.0",
   "listenPort": 8443,
   "publicHostname": "tunnel.example.invalid",
-  "publicPort": 443,
+  "publicPort": 8443,
   "allowedOrigins": [
-    "https://tunnel.example.invalid"
+    "https://tunnel.example.invalid:8443"
   ],
   "tlsCertificatePath": "tls/fullchain.pem",
   "tlsPrivateKeyPath": "tls/private-key.pem",
   "tlsMinimumVersion": "TLSv1.3",
-  "clientAddressSource": "loopback-x-forwarded-for",
+  "clientAddressSource": "socket",
   "maxConnections": 256,
   "listenBacklog": 128,
   "shutdownTimeoutMs": 15000,
