@@ -16,6 +16,8 @@
     "test:without-e2e:built": "corepack pnpm --recursive --workspace-concurrency=1 --if-present run test:without-e2e",
     "test:coverage": "vitest run --coverage --config vitest.coverage.config.ts",
     "build": "tsc --build",
+    "prestart": "corepack pnpm build",
+    "start": "node scripts/start-host.mjs",
     "prestart:server": "corepack pnpm build",
     "start:server": "node scripts/start-host.mjs server",
     "prestart:agent": "corepack pnpm build",

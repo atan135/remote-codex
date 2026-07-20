@@ -86,19 +86,26 @@ SHA-256 inventory、升级顺序和安全回滚见[发布、升级与回滚](doc
 为三台机器从同一受控 Git commit 进行前台联调，根 `package.json` 提供以下快捷命令：
 
 ```powershell
-$env:REMOTE_CODEX_CONFIG_ROOT = "C:\RemoteCodex\server-test"
-corepack pnpm start:server
-
-$env:REMOTE_CODEX_CONFIG_ROOT = "$env:LOCALAPPDATA\RemoteCodex\egress-agent-test"
-corepack pnpm start:agent
-
-$env:REMOTE_CODEX_CONFIG_ROOT = "$env:LOCALAPPDATA\RemoteCodex\edge-client-test"
-corepack pnpm start:edge
+Copy-Item .\config\start.example.json .\config\local.start.json
+# 编辑 local.start.json：设置本机 role、仓库外的绝对 configRoot 和 manifest 文件名。
+corepack pnpm start
 ```
 
-Linux 上使用相同的 `REMOTE_CODEX_CONFIG_ROOT` 和 `corepack pnpm start:server` 命令。每个 `start:*`
-都会先构建 workspace，再以前台子进程启动对应的 host CLI；`Ctrl+C` 会转发给该进程。可选的
-`REMOTE_CODEX_MANIFEST` 只用于指定配置根内的 manifest 文件名，默认是 `manifest.json`。
+`config/local.start.json` 是已忽略的本机启动指针，不得提交；它只允许以下严格结构，且不包含
+私钥、TLS 材料、目标 hostname、URL 或其他配置内容：
+
+```json
+{
+  "role": "edge",
+  "configRoot": "E:/RemoteCodex/edge-client-test",
+  "manifest": "manifest.json"
+}
+```
+
+公网机器把 `role` 设为 `server`，本机 Agent 设为 `agent`，目标机器设为 `edge`；三台机器随后都
+直接运行 `corepack pnpm start`。`start:server`、`start:agent` 和 `start:edge` 可用于显式指定角色，
+但它们必须与本机文件中的 `role` 一致。每个命令都会先构建 workspace，再以前台子进程启动对应的
+host CLI；`Ctrl+C` 会转发给该进程。
 
 配置根必须位于仓库外，且在启动前已通过 `ops deployment validate`；其中包含该角色的 manifest、
 配置、独立身份材料和必要公钥。Server 还需要 TLS 材料、peer registry 与授权注册表。快捷命令不

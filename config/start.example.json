@@ -1,0 +1,5 @@
+{
+  "role": "edge",
+  "configRoot": "E:/RemoteCodex/edge-client-test",
+  "manifest": "manifest.json"
+}
