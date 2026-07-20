@@ -1,6 +1,6 @@
 import { generateKeyPairSync } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -455,6 +455,10 @@ describe("离线生产 bundle 校验", () => {
         role: IdentityKeyRole.SERVER_CAPABILITY_SIGNING,
         keyId: "server-key"
       });
+      writeFileSync(
+        join(root, server.publicKeyPath),
+        readFileSync(join(root, server.publicKeyPath), "utf8").replace(/\n/gu, "\r\n")
+      );
       createOwnerOnlyDirectory(root, "tls");
       writeNewFile(join(root, "tls/fullchain.pem"), "certificate", "public-readonly", FAST_TEST_SECURITY);
       writeNewFile(join(root, "tls/private-key.pem"), "private-key", "owner-only", FAST_TEST_SECURITY);

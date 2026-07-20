@@ -138,7 +138,7 @@ function decodePemContainer(serialized: string, label: "PUBLIC KEY" | "PRIVATE K
   if (match?.[1] === undefined) {
     return fail(label === "PUBLIC KEY" ? "OPS_PUBLIC_KEY_INVALID" : "OPS_PRIVATE_KEY_INVALID");
   }
-  const encoded = match[1].replace(/\r?\n/gu, "");
+  const encoded = match[1].replace(/[\r\n]/gu, "");
   if (encoded.length === 0 || encoded.length % 4 !== 0) {
     return fail(label === "PUBLIC KEY" ? "OPS_PUBLIC_KEY_INVALID" : "OPS_PRIVATE_KEY_INVALID");
   }
