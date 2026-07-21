@@ -98,6 +98,11 @@ DNS 放宽、redirect 和任意 TCP 目标。edge 不保存或向本地前端暴
 stream、内部 ID 与 capability 都不可在重连后复用。只有 WSS 重新连接、完成认证并在线后，
 本地 CONNECT 才能创建新的 stream。
 
+WSS 是双向异步传输；server 对同一已认证 edge session 中刚终结的 stream 仅短时、限量保留
+stream ID 元数据。该窗口内迟到且格式合法的 `STREAM_DATA`、`STREAM_CREDIT` 或 `STREAM_CLOSE`
+直接丢弃，不会恢复 stream、转发字节或改变路由。其他未知、过期或格式错误的 stream 帧仍以
+`PROTOCOL_VIOLATION` fail closed。
+
 ## Agent 最终拨号边界
 
 egress-agent 没有入站监听器、HTTP 转发客户端或代理链；它只创建到 server 的受认证出站

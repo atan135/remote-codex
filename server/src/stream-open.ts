@@ -143,6 +143,17 @@ interface ActiveStream extends Omit<StreamOwnership, "state" | "bufferedBytes"> 
   agentToEdgeBytes: number;
 }
 
+interface RecentlyClosedEdgeStream {
+  readonly edgePeerId: string;
+  readonly expiresAtMs: number;
+}
+
+// WSS is full duplex: a peer can have a credit/data/close frame in flight when
+// the other side closes the stream. Remembering only recently closed IDs keeps
+// that terminal race from escalating to a connection-level protocol failure.
+const RECENTLY_CLOSED_EDGE_STREAM_GRACE_MS = 30_000;
+const MAX_RECENTLY_CLOSED_EDGE_STREAMS = 1_024;
+
 function streamKey(streamId: Uint8Array): string {
   return Buffer.from(streamId).toString("hex");
 }
@@ -263,6 +274,7 @@ export class StreamOpenCoordinator {
   private readonly bufferBudget: StreamBufferBudget;
   private readonly streamsByServerId = new Map<string, ActiveStream>();
   private readonly streamsByEdgeId = new Map<string, ActiveStream>();
+  private readonly recentlyClosedEdgeStreams = new Map<string, RecentlyClosedEdgeStream>();
   private readonly streamCountsByAuthorization = new Map<string, number>();
   private readonly streamCountsByEdgeUser = new Map<string, number>();
   private readonly streamCountsByEdgeDevice = new Map<string, number>();
@@ -430,6 +442,7 @@ export class StreamOpenCoordinator {
     for (const stream of [...this.streamsByServerId.values()]) {
       this.removeStream(stream, "SERVER_SHUTDOWN");
     }
+    this.recentlyClosedEdgeStreams.clear();
     this.openAttemptsByEdgeUser.clear();
     this.openAttemptsByEdgeDevice.clear();
     this.openAttemptsByAgent.clear();
@@ -604,6 +617,9 @@ export class StreamOpenCoordinator {
   private handleNonOpenEdgeFrame(session: AuthenticatedPeerSession, frame: TunnelFrame): void {
     const stream = this.streamsByEdgeId.get(edgeStreamKey(session.peerId, frame.streamId));
     if (stream === undefined || stream.edgePeerId !== session.peerId) {
+      if (this.isLateFrameForRecentlyClosedEdgeStream(session.peerId, frame)) {
+        return;
+      }
       this.sendEdgeError(session.peerId, frame.streamId, TunnelErrorCode.PROTOCOL_VIOLATION);
       return;
     }
@@ -1058,6 +1074,56 @@ export class StreamOpenCoordinator {
     this.removeStream(stream, code);
   }
 
+  private isLateFrameForRecentlyClosedEdgeStream(sessionPeerId: string, frame: TunnelFrame): boolean {
+    const edgeKey = edgeStreamKey(sessionPeerId, frame.streamId);
+    this.pruneRecentlyClosedEdgeStreams(this.readNow());
+    const closed = this.recentlyClosedEdgeStreams.get(edgeKey);
+    if (closed === undefined || closed.edgePeerId !== sessionPeerId) {
+      return false;
+    }
+
+    if (frame.type === FrameType.STREAM_DATA) {
+      const payload = decodeFramePayload(frame);
+      return payload instanceof Uint8Array && payload.byteLength > 0;
+    }
+    if (frame.type === FrameType.STREAM_CREDIT) {
+      return creditPayload(frame) !== undefined;
+    }
+    return frame.type === FrameType.STREAM_CLOSE && closePayload(frame) !== undefined;
+  }
+
+  private rememberRecentlyClosedEdgeStream(stream: ActiveStream): void {
+    const nowMs = this.readNow();
+    this.pruneRecentlyClosedEdgeStreams(nowMs);
+    while (this.recentlyClosedEdgeStreams.size >= MAX_RECENTLY_CLOSED_EDGE_STREAMS) {
+      const oldestKey = this.recentlyClosedEdgeStreams.keys().next().value;
+      if (oldestKey === undefined) {
+        break;
+      }
+      this.recentlyClosedEdgeStreams.delete(oldestKey);
+    }
+    this.recentlyClosedEdgeStreams.set(stream.edgeStreamKey, {
+      edgePeerId: stream.edgePeerId,
+      expiresAtMs: nowMs + RECENTLY_CLOSED_EDGE_STREAM_GRACE_MS
+    });
+  }
+
+  private pruneRecentlyClosedEdgeStreams(nowMs: number): void {
+    for (const [key, closed] of this.recentlyClosedEdgeStreams) {
+      if (closed.expiresAtMs <= nowMs) {
+        this.recentlyClosedEdgeStreams.delete(key);
+      }
+    }
+  }
+
+  private removeRecentlyClosedEdgeStreamsForPeer(peerId: string): void {
+    for (const [key, closed] of this.recentlyClosedEdgeStreams) {
+      if (closed.edgePeerId === peerId) {
+        this.recentlyClosedEdgeStreams.delete(key);
+      }
+    }
+  }
+
   private handleSessionRemoval(session: AuthenticatedPeerSession): void {
     for (const stream of [...this.streamsByServerId.values()]) {
       if (stream.edgePeerId === session.peerId) {
@@ -1080,6 +1146,7 @@ export class StreamOpenCoordinator {
         this.removeStream(stream, TunnelErrorCode.PEER_DISCONNECTED);
       }
     }
+    this.removeRecentlyClosedEdgeStreamsForPeer(session.peerId);
   }
 
   private handleRevocation(revocation: AuthorizationRevocation): void {
@@ -1139,6 +1206,7 @@ export class StreamOpenCoordinator {
     stream.pendingCreditToEdgeBytes = 0;
     this.streamsByServerId.delete(stream.serverStreamKey);
     this.streamsByEdgeId.delete(stream.edgeStreamKey);
+    this.rememberRecentlyClosedEdgeStream(stream);
     this.decrementCounter(this.streamCountsByAuthorization, stream.authorizationKey);
     this.decrementCounter(this.streamCountsByEdgeUser, stream.edgeUserId);
     this.decrementCounter(this.streamCountsByEdgeDevice, stream.edgeDeviceId);

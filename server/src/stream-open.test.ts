@@ -634,6 +634,13 @@ describe("server stream.open 授权与 capability 签发", () => {
     expect(peers.framesFor(alicePeer.peerId, FrameType.STREAM_CLOSE)[0]?.streamId).toEqual(streamId(1));
     expect(coordinator.getActiveStreams()).toHaveLength(0);
 
+    // agent close 与 edge credit 是两条独立 WSS 的反向消息，credit 可以在
+    // server 终结 stream 后迟到。它不能重新打开 stream，也不能关闭 edge WSS。
+    const errorsBeforeLateCredit = peers.framesFor(alicePeer.peerId, FrameType.STREAM_ERROR).length;
+    peers.emit(alicePeer.peerId, credit(streamId(1), 1));
+    expect(peers.framesFor(alicePeer.peerId, FrameType.STREAM_ERROR)).toHaveLength(errorsBeforeLateCredit);
+    expect(coordinator.getActiveStreams()).toHaveLength(0);
+
     peers.emit(alicePeer.peerId, streamFrame(FrameType.STREAM_CREDIT, streamId(99), new Uint8Array([0, 0, 0, 1])));
     expect(errorCode(peers.framesFor(alicePeer.peerId, FrameType.STREAM_ERROR).at(-1)!)).toBe(
       TunnelErrorCode.PROTOCOL_VIOLATION
