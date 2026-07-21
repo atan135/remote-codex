@@ -16,6 +16,17 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $TaskName = 'RemoteCodex-EdgeClient'
 
+function Test-TaskOwnedByCurrentUser {
+    param([Parameter(Mandatory = $true)][string]$TaskUserId)
+
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $acceptedIds = @($identity.Name, $identity.User.Value)
+    if ($identity.Name -eq ("{0}\\{1}" -f $env:COMPUTERNAME, $env:USERNAME)) {
+        $acceptedIds += $env:USERNAME
+    }
+    return $acceptedIds -contains $TaskUserId
+}
+
 function Resolve-ApprovedAddresses {
     param([Parameter(Mandatory = $true)][string]$Hostname)
 
@@ -59,7 +70,7 @@ if (
 $serverAddresses = Resolve-ApprovedAddresses -Hostname $serverUri.DnsSafeHost
 $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-$taskOwned = $null -ne $task -and @($identity.Name, $identity.User.Value) -contains $task.Principal.UserId
+$taskOwned = $null -ne $task -and (Test-TaskOwnedByCurrentUser -TaskUserId $task.Principal.UserId)
 $taskRunning = $taskOwned -and $task.State -eq 'Running'
 $taskInfo = if ($taskOwned) { Get-ScheduledTaskInfo -TaskName $TaskName } else { $null }
 $processes = @(

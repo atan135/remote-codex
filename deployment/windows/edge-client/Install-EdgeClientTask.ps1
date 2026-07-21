@@ -16,6 +16,17 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $TaskName = 'RemoteCodex-EdgeClient'
 
+function Test-TaskOwnedByCurrentUser {
+    param([Parameter(Mandatory = $true)][string]$TaskUserId)
+
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $acceptedIds = @($identity.Name, $identity.User.Value)
+    if ($identity.Name -eq ("{0}\\{1}" -f $env:COMPUTERNAME, $env:USERNAME)) {
+        $acceptedIds += $env:USERNAME
+    }
+    return $acceptedIds -contains $TaskUserId
+}
+
 function Resolve-LocalDirectory {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -39,7 +50,7 @@ if ($identity.User.Value -eq 'S-1-5-18' -or $principalCheck.IsInRole([System.Sec
     throw 'EDGE_INSTALL_NON_ADMIN_USER_REQUIRED'
 }
 $existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-if ($null -ne $existingTask -and @($identity.Name, $identity.User.Value) -notcontains $existingTask.Principal.UserId) {
+if ($null -ne $existingTask -and -not (Test-TaskOwnedByCurrentUser -TaskUserId $existingTask.Principal.UserId)) {
     throw 'EDGE_TASK_OWNER_MISMATCH'
 }
 
