@@ -21,7 +21,8 @@ function Test-TaskOwnedByCurrentUser {
 
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $acceptedIds = @($identity.Name, $identity.User.Value)
-    if ($identity.Name -eq ("{0}\\{1}" -f $env:COMPUTERNAME, $env:USERNAME)) {
+    $localUserName = $identity.Name.Substring($identity.Name.LastIndexOf('\') + 1)
+    if ($localUserName -eq $env:USERNAME) {
         $acceptedIds += $env:USERNAME
     }
     return $acceptedIds -contains $TaskUserId
