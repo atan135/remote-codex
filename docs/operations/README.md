@@ -12,6 +12,7 @@ Agent 无入站、Edge 只监听 `127.0.0.1`、`server-host` 是唯一公网 `84
 | Public Server 安装、TLS 续期、健康检查 | [Public Server 部署与加固](public-server-deployment.md) | Linux、唯一公网入口 |
 | 公司 Egress Agent 安装与网络核对 | [Windows Egress Agent 部署与演练](windows-egress-agent-deployment.md) | 普通用户任务、只出站 |
 | Edge 设备接入、`HTTPS_PROXY` 与 loopback 验收 | [Windows Edge Client 用户接入](windows-edge-client-deployment.md) | 独立设备身份、本地 CONNECT |
+| Windows Edge 实测安装、密钥轮换与排障 | [Windows边缘客户端实测部署与排障](Windows边缘客户端实测部署与排障.md) | 本次环境路径与已验证问题定位 |
 | 版本化产物、升级顺序、兼容与安全回滚 | [发布、升级与回滚](release-and-rollback.md) | 四个生产 workspace 与运行依赖 |
 | 故障定位、容量告警、脱敏取证和事件响应 | [故障定位与事件响应](incident-response.md) | 拒绝新流或关闭关联流，不拓宽路由 |
 
