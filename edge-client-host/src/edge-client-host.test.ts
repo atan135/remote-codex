@@ -295,8 +295,8 @@ describe("edge production host", () => {
     expect(createProxy).not.toHaveBeenCalled();
   });
 
-  it("认证撤销/replay 和重试耗尽会幂等关闭 listener、WSS、stream 与进程 lease", async () => {
-    for (const code of ["AUTH_UNAUTHORIZED", "AUTH_REPLAYED", "RECONNECT_LIMIT_EXCEEDED"] as const) {
+  it("认证撤销/replay 会幂等关闭 listener、WSS、stream 与进程 lease", async () => {
+    for (const code of ["AUTH_UNAUTHORIZED", "AUTH_REPLAYED"] as const) {
       const runtime = new FakeRuntime();
       const proxy = new FakeProxy();
       const terminalFailure = vi.fn();
@@ -310,6 +310,26 @@ describe("edge production host", () => {
       expect(terminalFailure).toHaveBeenCalledOnce();
       expect(terminalFailure).toHaveBeenCalledWith(code);
     }
+  });
+
+  it("重连耗尽只记录离线状态，不主动关闭 host、listener 或进程 lease", async () => {
+    const runtime = new FakeRuntime();
+    const proxy = new FakeProxy();
+    const logs: string[] = [];
+    const terminalFailure = vi.fn();
+    const harness = hostHarness(runtime, proxy, logs, terminalFailure);
+    const running = await startEdgeClientHost("config-root", "manifest.json", harness.dependencies);
+
+    runtime.emit({ state: "offline", reconnectAttempts: 3, lastErrorCode: "RECONNECT_LIMIT_EXCEEDED" });
+
+    expect(runtime.stop).not.toHaveBeenCalled();
+    expect(proxy.stop).not.toHaveBeenCalled();
+    expect(harness.releaseLifetime).not.toHaveBeenCalled();
+    expect(terminalFailure).not.toHaveBeenCalled();
+    expect(logs.join("")).toContain("RECONNECT_LIMIT_EXCEEDED");
+    expect(logs.join("")).not.toContain("edge.terminal_failure");
+
+    await running.close();
   });
 
   it("runtime 订阅时已经 terminal 不会开始创建 listener", async () => {

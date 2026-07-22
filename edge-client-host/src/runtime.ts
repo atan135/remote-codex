@@ -22,13 +22,12 @@ import { SafeEdgeProcessLogger } from "./logging.js";
 import { createPersistentEdgeStatusLog, type EdgeProcessLogSink } from "./persistent-log.js";
 
 const TUNNEL_PATH = "/tunnel";
-const TERMINAL_ERROR_CODES = new Set([
+const HOST_TERMINAL_ERROR_CODES = new Set([
   "AUTH_EXPIRED",
   "AUTH_FAILED",
   "AUTH_REPLAYED",
   "AUTH_UNAUTHORIZED",
-  "EDGE_RECONNECT_JITTER_INVALID",
-  "RECONNECT_LIMIT_EXCEEDED"
+  "EDGE_RECONNECT_JITTER_INVALID"
 ]);
 
 export interface EdgeRuntimeHandle extends EdgeStreamGateway {
@@ -300,7 +299,7 @@ export async function startEdgeClientHost(
         !terminalReported &&
         status.state === "offline" &&
         status.lastErrorCode !== undefined &&
-        TERMINAL_ERROR_CODES.has(status.lastErrorCode)
+        HOST_TERMINAL_ERROR_CODES.has(status.lastErrorCode)
       ) {
         terminalReported = true;
         logger.lifecycle("edge.terminal_failure", status);

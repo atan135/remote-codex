@@ -53,7 +53,10 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File `
 等待最多 15 秒确认不再为 `Running`；它不声称调用了 host graceful shutdown。Windows 会回收本机
 listener/WSS，server 的 peer-disconnect 会清理 stream。脚本超时并返回 `EDGE_TASK_STOP_TIMEOUT`
 时，先确认现有进程和 listener 已消失，不能直接启动第二实例。正常终端信号或 runtime 的认证终止、
-撤销、replay 和重试耗尽会由 host 幂等关闭 listener、WSS 与全部 stream。
+撤销和 replay 会由 host 幂等关闭 listener、WSS 与全部 stream。`PROTOCOL_VIOLATION` 会立即关闭
+当前不可信 WSS 与关联 stream，并按配置有界重连；达到上限后记录 `RECONNECT_LIMIT_EXCEEDED` 并保持
+host 与 loopback listener 运行，不会主动退出进程。此时没有可用隧道，待部署版本或对端协议修复后需
+手工重启任务以重新建连。
 
 ## Codex 会话接入
 
