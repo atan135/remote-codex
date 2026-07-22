@@ -607,6 +607,7 @@ describe("owner-only edge 状态日志", () => {
 
 describe("Windows edge 部署静态边界", () => {
   const deploymentRoot = new URL("../../deployment/windows/edge-client/", import.meta.url);
+  const pm2DeploymentRoot = new URL("../../deployment/windows/pm2/", import.meta.url);
   const scripts = [
     "Install-EdgeClientTask.ps1",
     "Uninstall-EdgeClientTask.ps1",
@@ -614,10 +615,18 @@ describe("Windows edge 部署静态边界", () => {
     "Stop-EdgeClientTask.ps1",
     "Test-EdgeClientStatus.ps1"
   ];
+  const pm2Scripts = [
+    "Start-EdgeClientPm2.ps1",
+    "Restart-EdgeClientPm2.ps1",
+    "Stop-EdgeClientPm2.ps1"
+  ];
 
   it("所有脚本通过 PowerShell AST 解析", () => {
-    for (const script of scripts) {
-      const path = fileURLToPath(new URL(script, deploymentRoot)).replaceAll("'", "''");
+    for (const [script, root] of [
+      ...scripts.map((script) => [script, deploymentRoot] as const),
+      ...pm2Scripts.map((script) => [script, pm2DeploymentRoot] as const)
+    ]) {
+      const path = fileURLToPath(new URL(script, root)).replaceAll("'", "''");
       const command = `$tokens=$null;$errors=$null;[System.Management.Automation.Language.Parser]::ParseFile('${path}',[ref]$tokens,[ref]$errors)>$null;if($errors.Count -ne 0){exit 1}`;
       const parsed = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
         stdio: "ignore",
@@ -638,6 +647,22 @@ describe("Windows edge 部署静态边界", () => {
     expect(install).toContain("EDGE_TASK_OWNER_MISMATCH");
     expect(install.indexOf("EDGE_TASK_OWNER_MISMATCH")).toBeLessThan(install.indexOf("Register-ScheduledTask"));
     expect(install).not.toMatch(/RunLevel\s+Highest|LogonType\s+(?:ServiceAccount|Password)|-UserId\s+(?:SYSTEM|'SYSTEM'|[" ]SYSTEM[" ])/gu);
+  });
+
+  it("PM2 脚本仅管理固定 edge host，启动前校验部署且拒绝并行任务", () => {
+    const start = readFileSync(new URL("Start-EdgeClientPm2.ps1", pm2DeploymentRoot), "utf8");
+    const restart = readFileSync(new URL("Restart-EdgeClientPm2.ps1", pm2DeploymentRoot), "utf8");
+    const stop = readFileSync(new URL("Stop-EdgeClientPm2.ps1", pm2DeploymentRoot), "utf8");
+    const serializedScripts = [start, restart, stop].join("\n");
+
+    expect(start).toContain("'deployment' 'validate'");
+    expect(start).toContain("'pm2.cmd'");
+    expect(start).toContain("'start' $hostCli");
+    expect(start).toContain("'remote-codex-edge-client'");
+    expect(start).toContain("'EDGE_PM2_TASK_RUNNING'");
+    expect(restart).toContain("'restart' $ProcessName");
+    expect(stop).toContain("'stop' $ProcessName");
+    expect(serializedScripts).not.toMatch(/(?:PM2 Plus|pm2\.io|--update-env|setx|ProxyEnable|ProxyServer|New-NetFirewallRule|New-PSSession|Enter-PSSession|winrm)/giu);
   });
 
   it("脚本不设置系统代理/防火墙、不接收命令，也不创建额外 listener", () => {

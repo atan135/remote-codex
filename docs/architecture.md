@@ -141,6 +141,11 @@ release 以机器可读 allowlist 只暂存实际运行 `.js`、package metadata
 inventory 与兼容、升级、回滚流程见[发布 runbook](operations/release-and-rollback.md)。当前协议不
 接受版本混跑；升级/回滚造成的 WSS 断开必须关闭旧 stream/TCP，不能恢复或迁移。
 
+Windows Edge 可使用当前普通用户的登录任务，或使用 `deployment/windows/pm2/` 中固定
+`edge-client-host` 入口的本地 PM2 管理脚本；两种方式不得同时运行。PM2 只负责当前用户的本地
+进程生命周期，不启用 PM2 Plus、远程控制、额外网络 endpoint 或应用 listener；它不能改变 edge
+配置、目标 allowlist、loopback 绑定或认证材料的加载方式。
+
 网络功能验收必须证明：
 
 1. edge Codex 请求只能经已授权的在线 agent 到达已批准网关。
