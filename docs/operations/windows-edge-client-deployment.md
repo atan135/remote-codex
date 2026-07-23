@@ -54,9 +54,9 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File `
 listener/WSS，server 的 peer-disconnect 会清理 stream。脚本超时并返回 `EDGE_TASK_STOP_TIMEOUT`
 时，先确认现有进程和 listener 已消失，不能直接启动第二实例。正常终端信号或 runtime 的认证终止、
 撤销和 replay 会由 host 幂等关闭 listener、WSS 与全部 stream。`PROTOCOL_VIOLATION` 会立即关闭
-当前不可信 WSS 与关联 stream，并按配置有界重连；达到上限后记录 `RECONNECT_LIMIT_EXCEEDED` 并保持
-host 与 loopback listener 运行，不会主动退出进程。此时没有可用隧道，待部署版本或对端协议修复后需
-手工重启任务以重新建连。
+当前不可信 WSS 与关联 stream，并按配置有界重连；每次重新认证并进入 `online` 后，连续失败计数会归零。
+只有持续无法恢复的断线才会达到上限，记录 `RECONNECT_LIMIT_EXCEEDED` 并保持 host 与 loopback listener
+运行，不会主动退出进程。此时没有可用隧道，待部署版本或对端协议修复后需手工重启任务以重新建连。
 
 ## PM2 后台管理
 

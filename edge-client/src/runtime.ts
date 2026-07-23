@@ -600,6 +600,9 @@ export class EdgeClientRuntime implements EdgeStreamGateway {
         }
 
         connection.phase = "online";
+        // 只限制连续失败。已完成一次新的认证会话后，过去可恢复的断线不能
+        // 累积到后续的重连上限。
+        this.reconnectAttempts = 0;
         this.heartbeatSequence = payload.sequence;
         this.clearAuthenticationTimer(connection);
         try {

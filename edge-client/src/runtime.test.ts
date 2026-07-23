@@ -685,6 +685,35 @@ describe("edge persistent WSS session", () => {
     expect(tlsSockets.sockets).toHaveLength(0);
   });
 
+  it("重新认证成功后重置连续重连计数，后续可恢复断线不会耗尽上限", () => {
+    vi.useFakeTimers();
+    const sockets = new FakeSocketFactory();
+    const runtime = new EdgeClientRuntime({
+      config: createConfig(1),
+      ...createIdentity(),
+      socketFactory: sockets,
+      now: () => 1_000,
+      random: () => 1
+    });
+
+    runtime.start();
+    sockets.sockets[0]?.emitClose();
+    expect(runtime.getStatus()).toEqual({ state: "backoff", reconnectAttempts: 1, lastErrorCode: "WSS_DISCONNECTED" });
+
+    vi.advanceTimersByTime(100);
+    const recovered = sockets.sockets[1];
+    if (recovered === undefined) {
+      throw new Error("expected replacement WSS socket");
+    }
+    authenticate(recovered, 1_000);
+    expect(runtime.getStatus()).toEqual({ state: "online", reconnectAttempts: 0 });
+
+    recovered.emitClose();
+    expect(runtime.getStatus()).toEqual({ state: "backoff", reconnectAttempts: 1, lastErrorCode: "WSS_DISCONNECTED" });
+    vi.advanceTimersByTime(100);
+    expect(sockets.sockets).toHaveLength(3);
+  });
+
   it("连接工厂、注册发送、challenge、心跳发送与 socket error 都收敛为有界断线", () => {
     vi.useFakeTimers();
     const throwingFactory: EdgeSocketFactory = {
